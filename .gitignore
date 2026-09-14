@@ -1,0 +1,6 @@
+# Compiled binaries (the guest relay is embedded via go:embed and IS tracked)
+/vivarium
+*.test
+
+# Local runtime state
+*.log
