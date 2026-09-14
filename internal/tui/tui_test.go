@@ -332,28 +332,32 @@ func TestAPIKeyFormProviderSetsDefaults(t *testing.T) {
 	}
 }
 
-func TestRecipeAddEndpointAddsProviderEnv(t *testing.T) {
+func TestRecipeAddEndpoint(t *testing.T) {
 	app := &App{ctx: &Context{Client: &fakeAPI{}}, theme: DefaultTheme(), spinner: spinner.New()}
 	ed := newRecipeEditorScreen(app, models.Recipe{EnvVars: map[string]string{}}, nil)
+	host := recipeEndpointsHost{ed}
 
 	openai := models.APIKey{
 		ID: "k1", Name: "OpenAI", ProviderType: models.ProviderOpenAI,
 		BaseURL: "https://api.openai.com/v1", MockURL: "https://api.openai.com/v1",
 	}
-	ed.addEndpoint(openai)
-	if got := ed.recipe.EnvVars["OPENAI_API_KEY"]; got != "viv-dummy-key" {
-		t.Fatalf("OPENAI_API_KEY = %q", got)
+	if err := host.AddEndpoint(openai); err != nil {
+		t.Fatal(err)
 	}
-	for _, baseVar := range []string{"OPENAI_BASE_URL", "OPENAI_API_BASE"} {
-		if _, ok := ed.recipe.EnvVars[baseVar]; ok {
-			t.Fatalf("base URL var %s must not be auto-added", baseVar)
-		}
+	if len(ed.recipe.APIEndpoints) != 1 || ed.recipe.APIEndpoints[0].ID != "k1" {
+		t.Fatalf("endpoints = %+v", ed.recipe.APIEndpoints)
 	}
-
-	custom := models.APIKey{ProviderType: models.ProviderCustom, BaseURL: "https://x/v1", MockURL: "https://x/v1"}
-	ed.addEndpoint(custom)
-	if _, ok := ed.recipe.EnvVars["CUSTOM_API_KEY"]; ok {
-		t.Fatal("custom provider must not auto-add env vars")
+	// A duplicate mock URL is rejected.
+	if err := host.AddEndpoint(openai); err == nil {
+		t.Fatal("expected a duplicate mock_url error")
+	}
+	// Endpoints no longer add provider env vars; those are injected per exec.
+	custom := models.APIKey{ID: "k2", ProviderType: models.ProviderCustom, BaseURL: "https://x/v1", MockURL: "https://x/v1"}
+	if err := host.AddEndpoint(custom); err != nil {
+		t.Fatal(err)
+	}
+	if len(ed.recipe.EnvVars) != 0 {
+		t.Fatalf("endpoints must not add recipe env vars, got %+v", ed.recipe.EnvVars)
 	}
 }
 

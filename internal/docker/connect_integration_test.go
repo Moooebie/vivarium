@@ -45,14 +45,14 @@ func TestIntegrationConnectIndependentSessions(t *testing.T) {
 	}
 	defer func() { _ = c.Remove(ctx, id) }()
 
-	s1, _, err := c.Connect(ctx, id, 100, 30)
+	s1, _, err := c.Connect(ctx, id, 100, 30, nil)
 	if err != nil {
 		t.Fatalf("connect 1: %v", err)
 	}
 	defer s1.Close()
 	pid1 := shellPID(t, s1)
 
-	s2, _, err := c.Connect(ctx, id, 100, 30)
+	s2, _, err := c.Connect(ctx, id, 100, 30, nil)
 	if err != nil {
 		t.Fatalf("connect 2: %v", err)
 	}

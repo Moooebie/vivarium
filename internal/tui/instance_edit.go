@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -14,7 +15,6 @@ type editInstanceScreen struct {
 	app  *App
 	inst apitypes.InstanceView
 	form *form
-	gpus []models.GPU
 	err  string
 }
 
@@ -34,8 +34,9 @@ type editActionResultMsg struct {
 func newEditInstanceScreen(app *App, inst apitypes.InstanceView) *editInstanceScreen {
 	s := &editInstanceScreen{app: app, inst: inst}
 	s.form = newForm(app.theme)
-	s.form.addAction("mounts", "Mount Points")
-	s.form.addAction("gpus", "GPUs")
+	s.form.addAction("endpoints", "API Endpoints")
+	s.form.addDisabledAction("mounts", "Mount Points (fixed at creation)")
+	s.form.addDisabledAction("gpus", "GPUs (fixed at creation)")
 	s.form.addAction("info", "Connection Info")
 	s.form.addAction("toggle", "Start/Halt")
 	s.form.addAction("connect", "Connect Shell")
@@ -44,6 +45,7 @@ func newEditInstanceScreen(app *App, inst apitypes.InstanceView) *editInstanceSc
 	s.form.addAction("inject", "Inject File")
 	s.form.addButton(button{Key: "delete", Label: "Delete", Hotkey: "C-d"})
 	s.refreshLabels()
+	s.form.focusFirst()
 	return s
 }
 
@@ -52,20 +54,10 @@ func (s *editInstanceScreen) Title() string        { return "Edit Instance" }
 func (s *editInstanceScreen) CapturingInput() bool { return s.form.Capturing() }
 
 func (s *editInstanceScreen) refreshLabels() {
-	s.form.setActionLabel("mounts", "Mount Points: "+itoa(len(s.inst.Mounts)))
-	s.form.setActionLabel("gpus", "GPUs: "+itoa(len(s.inst.GPUs)))
+	s.form.setActionLabel("endpoints", "API Endpoints: "+itoa(len(s.inst.Endpoints)))
 }
 
-func (s *editInstanceScreen) Init() tea.Cmd {
-	return func() tea.Msg {
-		gpus, err := s.app.ctx.Client.ListGPUs(context.Background())
-		if err != nil {
-			return editDoneMsg{err: err}
-		}
-		s.gpus = gpus
-		return nil
-	}
-}
+func (s *editInstanceScreen) Init() tea.Cmd { return nil }
 
 // Reload re-fetches the instance; used when a child editor pops.
 func (s *editInstanceScreen) Reload() tea.Cmd {
@@ -130,14 +122,8 @@ func (s *editInstanceScreen) handleKey(msg tea.KeyMsg) (Screen, tea.Cmd) {
 
 func (s *editInstanceScreen) dispatch(action string) tea.Cmd {
 	switch action {
-	case "mounts":
-		ed := newMountsEditorScreen(s.app, "Mount Points", s.inst.Mounts, s.applyMounts)
-		ed.popOnSave = true
-		return push(ed)
-	case "gpus":
-		ed := newGPUsEditorScreen(s.app, "GPUs", s.gpus, s.inst.GPUs, s.applyGPUs)
-		ed.popOnSave = true
-		return push(ed)
+	case "endpoints":
+		return s.openEndpoints()
 	case "info":
 		return push(newConnectionInfoScreen(s.app, s.inst))
 	case "toggle":
@@ -240,23 +226,91 @@ func (s *editInstanceScreen) toggle() tea.Cmd {
 	})
 }
 
-func (s *editInstanceScreen) applyMounts(mounts []models.Mount) tea.Cmd {
-	id := s.inst.ID
-	return tea.Batch(setBusy(true, "Updating mounts"), func() tea.Msg {
-		_, err := s.app.ctx.Client.UpdateInstance(context.Background(), id,
-			apitypes.InstanceUpdateRequest{Mounts: &mounts})
-		return listSavedMsg{err: err}
-	})
+// openEndpoints opens the shared endpoints editor against a live instance.
+// Edits are staged and applied once when the editor is left.
+func (s *editInstanceScreen) openEndpoints() tea.Cmd {
+	host := newInstanceEndpointsHost(s.inst)
+	return push(newEndpointsEditorScreen(s.app, host, s.loadEndpointKeys, s.commitEndpoints(host)))
 }
 
-func (s *editInstanceScreen) applyGPUs(gpus []models.GPU) tea.Cmd {
-	id := s.inst.ID
-	return tea.Batch(setBusy(true, "Updating GPUs"), func() tea.Msg {
-		_, err := s.app.ctx.Client.UpdateInstance(context.Background(), id,
-			apitypes.InstanceUpdateRequest{GPUs: &gpus})
-		return listSavedMsg{err: err}
-	})
+func (s *editInstanceScreen) loadEndpointKeys() tea.Cmd {
+	return func() tea.Msg {
+		keys, err := s.app.ctx.Client.ListAPIKeys(context.Background())
+		return endpointsDataMsg{keys: keys, err: err}
+	}
 }
+
+func (s *editInstanceScreen) commitEndpoints(host *instanceEndpointsHost) func() tea.Cmd {
+	return func() tea.Cmd {
+		if !host.dirty {
+			return nil
+		}
+		ids := host.endpointIDs()
+		return tea.Batch(setBusy(true, "Updating endpoints"), func() tea.Msg {
+			view, err := s.app.ctx.Client.UpdateInstance(context.Background(), s.inst.ID,
+				apitypes.InstanceUpdateRequest{EndpointKeys: &ids})
+			return editDoneMsg{inst: view, status: "endpoints updated", err: err}
+		})
+	}
+}
+
+// instanceEndpointsHost adapts a live instance's bound endpoints to the shared
+// endpoints editor. Changes are staged and committed once by the parent.
+type instanceEndpointsHost struct {
+	endpoints []models.APIKey
+	saved     []apitypes.APIKeyView
+	dirty     bool
+}
+
+func newInstanceEndpointsHost(inst apitypes.InstanceView) *instanceEndpointsHost {
+	h := &instanceEndpointsHost{}
+	for _, e := range inst.Endpoints {
+		h.endpoints = append(h.endpoints, models.APIKey{
+			ID: e.KeyID, Name: e.KeyID, ProviderType: e.ProviderType,
+			BaseURL: e.BaseURL, MockURL: e.MockURL, RateLimitRPM: e.RateLimitRPM,
+		})
+	}
+	return h
+}
+
+func (h *instanceEndpointsHost) endpointIDs() []string {
+	ids := make([]string, 0, len(h.endpoints))
+	for _, e := range h.endpoints {
+		ids = append(ids, e.ID)
+	}
+	return ids
+}
+
+func (h *instanceEndpointsHost) Endpoints() []models.APIKey { return h.endpoints }
+func (h *instanceEndpointsHost) SetEndpoints(eps []models.APIKey) {
+	h.endpoints = eps
+}
+func (h *instanceEndpointsHost) SavedKeys() []apitypes.APIKeyView { return h.saved }
+func (h *instanceEndpointsHost) SetSavedKeys(keys []apitypes.APIKeyView) {
+	h.saved = keys
+	byID := make(map[string]apitypes.APIKeyView, len(keys))
+	for _, k := range keys {
+		byID[k.ID] = k
+	}
+	for i := range h.endpoints {
+		if k, ok := byID[h.endpoints[i].ID]; ok {
+			h.endpoints[i].Name = k.Name
+			h.endpoints[i].ProviderType = k.ProviderType
+			h.endpoints[i].BaseURL = k.BaseURL
+			h.endpoints[i].MockURL = k.MockURL
+		}
+	}
+}
+func (h *instanceEndpointsHost) AddEndpoint(k models.APIKey) error {
+	for _, e := range h.endpoints {
+		if e.ID == k.ID {
+			return errors.New("that API key is already bound")
+		}
+	}
+	h.endpoints = append(h.endpoints, k)
+	return nil
+}
+func (h *instanceEndpointsHost) OnChanged() { h.dirty = true }
 
 func (s *editInstanceScreen) clone() tea.Cmd {
 	req := cloneRequest(s.inst)

@@ -12,8 +12,10 @@ the backend Unix-socket API and shares wire types with it.
   shared by several terminals. `--daemon` runs the backend in the foreground,
   `--stop` stops a running daemon, and an in-process fallback is used if
   spawning fails.
-- **Instance editing** is supported by a new `PUT /api/v1/instances/{id}` with
-  container recreation when mounts/GPUs change.
+- **Instance editing** is supported by `PUT /api/v1/instances/{id}`: it renames
+  and/or rebinds API endpoints. Endpoint changes are applied live (registry +
+  `/etc/hosts` + per-exec env) without recreating the container. Mounts and GPUs
+  are fixed at creation and shown disabled in the editor.
 - **Secret reveal** is supported by `GET /api/v1/api-keys/{id}/secret` (the
   socket is mode `0600`).
 - **Vault-only setup.** The first-run flow goes straight to setting a master
@@ -47,12 +49,15 @@ cmd/vivarium/main.go   # mode dispatch: TUI (default) | --daemon | --stop | rese
 | --- | --- |
 | `GET /api/v1/ping` | Readiness probe for the TUI. |
 | `GET /api/v1/system/status` | Gains a `version` field. |
-| `PUT /api/v1/instances/{id}` | Update `name`; recreate container when `mounts`/`gpus` change. |
+| `PUT /api/v1/instances/{id}` | Rename and/or rebind API endpoints (live; no recreate). |
 | `GET /api/v1/api-keys/{id}/secret` | Return the stored secret for reveal (unlocked store). |
 | `GET /api/v1/instances/{id}/connect` | Upgrade to a raw stream for a new interactive exec shell. |
 | `POST /api/v1/instances/{id}/exec/{execID}/resize` | Resize an interactive exec session. |
 
-`Instance` gains `resources` and `user` so a recreated container is faithful.
+The endpoints manager is shared between the recipe editor (in-memory) and the
+instance editor (applied on exit); the instance editor disables Mounts and GPUs
+with an explanatory note, and instance creation warns when GPUs are bound.
+`Instance` retains `resources` and `user` from creation.
 
 ## Client
 
@@ -151,8 +156,10 @@ No IPC changes were required; the TUI talks only to the unchanged API.
 - **Instance wizard.** Two screens: Identity (name + recipe picker) then the
   ephemeral recipe editor, whose final button is **Create & Launch**. The
   redundant Mounts/GPUs steps are removed (the recipe owns them).
-- **Edit Instance.** Actions are a vertical list, with drill-down pages for
-  mounts, GPUs, rename, inject, and connection info.
+- **Edit Instance.** Actions are a vertical list: **API Endpoints** (shared
+  manager, applied on exit), **Connection Info**, Start/Halt, Connect, Clone,
+  Rename, Inject, Delete. **Mount Points** and **GPUs** are disabled with a note
+  because they are fixed at creation.
 - **Connect safety.** Connecting to a non-running container is rejected
   (`409`) by the daemon and guarded in the TUI, because Docker's API returns
   `101 UPGRADED` and hangs for stopped containers. Each connect opens an

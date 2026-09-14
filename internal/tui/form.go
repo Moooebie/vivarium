@@ -60,6 +60,21 @@ func (f *form) addAction(key, label string) {
 	f.rows = append(f.rows, formRow{kind: rowAction, key: key, label: label})
 }
 
+// addDisabledAction adds a non-selectable action row (rendered dim), used for
+// choices that are fixed at creation time.
+func (f *form) addDisabledAction(key, label string) {
+	f.rows = append(f.rows, formRow{kind: rowAction, key: key, label: label, disabled: true})
+}
+
+// focusFirst moves the cursor to the first selectable row, if any.
+func (f *form) focusFirst() {
+	f.cursor = 0
+	if !f.selectable(f.cursor) {
+		f.move(1)
+	}
+	f.sync()
+}
+
 // setActionLabel updates the label of a previously added action row.
 func (f *form) setActionLabel(key, label string) {
 	for i := range f.rows {
@@ -227,6 +242,9 @@ func (f *form) renderRow(i int) string {
 	case rowField:
 		return row.field.view()
 	case rowAction:
+		if row.disabled {
+			return f.theme.Dim.Render(row.label)
+		}
 		style := f.theme.FieldLabel
 		if selected {
 			style = f.theme.FieldFocus

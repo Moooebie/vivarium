@@ -32,9 +32,6 @@ func TestBuildCreateRequestGPUAndHosts(t *testing.T) {
 	if len(req.HostConfig.Mounts) != 1 || !req.HostConfig.Mounts[0].ReadOnly {
 		t.Fatalf("unexpected mounts: %+v", req.HostConfig.Mounts)
 	}
-	if len(req.HostConfig.ExtraHosts) != 1 || req.HostConfig.ExtraHosts[0] != "api.openai.com:172.28.0.1" {
-		t.Fatalf("unexpected extra hosts: %+v", req.HostConfig.ExtraHosts)
-	}
 	if len(req.HostConfig.Devices) != 2 {
 		t.Fatalf("expected 2 device mappings, got %+v", req.HostConfig.Devices)
 	}
@@ -167,15 +164,50 @@ func TestCreateAndStartInjectsCA(t *testing.T) {
 	}
 }
 
-func TestBuildCreateRequestMockHostIP(t *testing.T) {
-	c := NewControllerWithClient(NewClient(""), "172.28.0.1")
-	req := c.buildCreateRequest(ContainerSpec{
-		Image:      "img",
-		MockHosts:  []string{"api.openai.com"},
-		MockHostIP: "127.0.0.1",
-	})
-	if len(req.HostConfig.ExtraHosts) != 1 || req.HostConfig.ExtraHosts[0] != "api.openai.com:127.0.0.1" {
-		t.Fatalf("extra hosts = %+v", req.HostConfig.ExtraHosts)
+func TestSyncHosts(t *testing.T) {
+	var gotCmd []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/containers/cid/exec"):
+			var req execCreateRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Errorf("decode exec: %v", err)
+			}
+			gotCmd = req.Cmd
+			io.WriteString(w, `{"Id":"e1"}`)
+		case strings.HasSuffix(r.URL.Path, "/exec/e1/start"):
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/exec/e1/json"):
+			io.WriteString(w, `{"ExitCode":0}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewControllerWithClient(NewClientForURL(srv.URL, srv.Client()), "")
+	if err := c.SyncHosts(context.Background(), "cid", []string{"api.openai.com", "bad host"}, "127.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(gotCmd) != 3 || gotCmd[0] != "/bin/sh" || gotCmd[1] != "-c" {
+		t.Fatalf("cmd = %v", gotCmd)
+	}
+	script := gotCmd[2]
+	if !strings.Contains(script, "printf '%s %s # vivarium\\n' '127.0.0.1' 'api.openai.com'") {
+		t.Fatalf("script missing host entry:\n%s", script)
+	}
+	if strings.Contains(script, "bad host") {
+		t.Fatalf("invalid host was not sanitized:\n%s", script)
+	}
+}
+
+func TestSanitizeHost(t *testing.T) {
+	if got := sanitizeHost("api.openai.com"); got != "api.openai.com" {
+		t.Fatalf("sanitizeHost = %q", got)
+	}
+	if got := sanitizeHost("bad host; rm -rf /"); got != "" {
+		t.Fatalf("sanitizeHost = %q", got)
 	}
 }
 
@@ -257,7 +289,7 @@ func TestConnect(t *testing.T) {
 	defer srv.Close()
 
 	c := NewControllerWithClient(NewClientForURL(srv.URL, srv.Client()), "")
-	stream, execID, err := c.Connect(context.Background(), "cid", 120, 40)
+	stream, execID, err := c.Connect(context.Background(), "cid", 120, 40, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

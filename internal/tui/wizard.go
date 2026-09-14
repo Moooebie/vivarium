@@ -209,6 +209,16 @@ func (s *wizardScreen) create() tea.Cmd {
 	if recipe.BaseImageID == "" {
 		recipe.BaseImageID = s.defaultBaseImageID()
 	}
+	if len(recipe.GPUs) > 0 {
+		return confirm("GPU binding is fixed at creation and cannot be changed later "+
+			"without destroying the instance. Create it now?", func() tea.Cmd {
+			return s.doCreate(name, recipe)
+		})
+	}
+	return s.doCreate(name, recipe)
+}
+
+func (s *wizardScreen) doCreate(name string, recipe models.Recipe) tea.Cmd {
 	req := apitypes.InstanceCreateRequest{Name: name, Recipe: &recipe}
 	return tea.Batch(setBusy(true, "Creating instance"), func() tea.Msg {
 		inst, err := s.app.ctx.Client.CreateInstance(context.Background(), req)

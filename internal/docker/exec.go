@@ -14,8 +14,15 @@ import (
 // Exec runs a command in a container and returns its combined output. The
 // container must be running.
 func (c *Client) Exec(ctx context.Context, id string, cmd []string) (string, error) {
+	return c.ExecEnv(ctx, id, cmd, nil)
+}
+
+// ExecEnv runs a command with extra environment variables and returns its
+// combined output. It mirrors the env injection used by interactive Connect
+// sessions.
+func (c *Client) ExecEnv(ctx context.Context, id string, cmd []string, env []string) (string, error) {
 	var created execCreateResponse
-	create := execCreateRequest{AttachStdout: true, AttachStderr: true, Cmd: cmd}
+	create := execCreateRequest{AttachStdout: true, AttachStderr: true, Cmd: cmd, Env: env}
 	if err := c.postJSON(ctx, "/containers/"+escapePath(id)+"/exec", create, &created); err != nil {
 		return "", err
 	}
@@ -79,7 +86,8 @@ func (c *Client) ExecDetached(ctx context.Context, id, user string, cmd []string
 
 // CreateExec creates an exec instance with attached stdio and returns its ID.
 // When tty is true the stream is a raw TTY stream; otherwise it is multiplexed.
-func (c *Client) CreateExec(ctx context.Context, id string, cmd []string, tty bool) (string, error) {
+// env adds (and overrides) environment variables for the exec process.
+func (c *Client) CreateExec(ctx context.Context, id string, cmd []string, tty bool, env []string) (string, error) {
 	var created execCreateResponse
 	create := execCreateRequest{
 		AttachStdin:  true,
@@ -87,6 +95,7 @@ func (c *Client) CreateExec(ctx context.Context, id string, cmd []string, tty bo
 		AttachStderr: true,
 		Tty:          tty,
 		Cmd:          cmd,
+		Env:          env,
 	}
 	if err := c.postJSON(ctx, "/containers/"+escapePath(id)+"/exec", create, &created); err != nil {
 		return "", err

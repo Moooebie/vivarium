@@ -68,7 +68,7 @@ func TestCreateExecAndStartExec(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientForURL(srv.URL, srv.Client())
-	id, err := c.CreateExec(context.Background(), "cid", []string{"bash"}, true)
+	id, err := c.CreateExec(context.Background(), "cid", []string{"bash"}, true, nil)
 	if err != nil || id != "e9" {
 		t.Fatalf("create = %q, %v", id, err)
 	}

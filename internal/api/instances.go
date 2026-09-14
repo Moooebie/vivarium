@@ -110,18 +110,10 @@ func (s *Server) handleCreateInstance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	env := make(map[string]string, len(recipe.EnvVars))
-	for k, v := range recipe.EnvVars {
-		env[k] = v
-	}
-	for k, v := range providerKeyEnv(endpoints) {
-		env[k] = v
-	}
-	if len(s.proxy.CACertPEM) > 0 {
-		env["SSL_CERT_FILE"] = docker.GuestCAPEMPath
-		env["REQUESTS_CA_BUNDLE"] = docker.GuestCAPEMPath
-		env["NODE_EXTRA_CA_CERTS"] = docker.GuestCAPEMPath
-	}
+	// Provider dummy tokens are injected per exec session (see Connect), so the
+	// container environment holds only user-provided variables plus CA trust
+	// settings. This lets endpoints change without recreating the container.
+	env := buildInstanceEnv(recipe.EnvVars, s.proxy.CACertPEM)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 	defer cancel()
@@ -190,6 +182,10 @@ func (s *Server) handleCreateInstance(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, instanceView{Instance: inst})
 }
 
+// handleUpdateInstance renames an instance and/or rebinds its API endpoints.
+// Endpoint changes are applied live: the proxy registry is updated and the
+// container's /etc/hosts is resynced, so the container is never recreated.
+// Mounts and GPUs are fixed at create time.
 func (s *Server) handleUpdateInstance(w http.ResponseWriter, r *http.Request) {
 	inst, err := s.store.GetInstance(r.PathValue("id"))
 	if err != nil {
@@ -201,46 +197,36 @@ func (s *Server) handleUpdateInstance(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
-	structural := false
 	if req.Name != "" {
 		inst.Name = req.Name
 	}
-	if req.Mounts != nil {
-		for _, m := range *req.Mounts {
-			if err := m.Validate(); err != nil {
+	if req.EndpointKeys != nil {
+		keys := make([]models.APIKey, 0, len(*req.EndpointKeys))
+		seen := map[string]struct{}{}
+		for _, keyID := range *req.EndpointKeys {
+			if _, ok := seen[keyID]; ok {
+				continue
+			}
+			seen[keyID] = struct{}{}
+			k, err := s.store.GetAPIKey(keyID)
+			if err != nil {
 				writeMappedError(w, err)
 				return
 			}
+			keys = append(keys, k)
 		}
-		inst.Mounts = *req.Mounts
-		structural = true
-	}
-	if req.GPUs != nil {
-		for _, g := range *req.GPUs {
-			if err := g.Validate(); err != nil {
-				writeMappedError(w, err)
-				return
-			}
-		}
-		inst.GPUs = *req.GPUs
-		structural = true
-	}
-
-	if structural && inst.ContainerID != "" {
-		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
-		defer cancel()
-		if _, err := s.docker.EnsureNetwork(ctx); err != nil {
-			writeError(w, http.StatusServiceUnavailable, "docker network: "+err.Error())
+		endpoints := buildEndpoints(keys)
+		if err := s.verifyEndpointSecrets(endpoints); err != nil {
+			writeError(w, http.StatusPreconditionFailed, err.Error())
 			return
 		}
-		recreated, err := s.recreateInstance(ctx, inst)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, "recreate container: "+err.Error())
+		inst.Endpoints = endpoints
+		inst.EnvVars = buildInstanceEnv(inst.EnvVars, s.proxy.CACertPEM)
+		if err := s.syncInstanceHosts(r.Context(), inst); err != nil {
+			writeError(w, http.StatusBadGateway, "sync hosts: "+err.Error())
 			return
 		}
-		inst = recreated
 	}
-
 	if err := s.store.PutInstance(inst); err != nil {
 		writeMappedError(w, err)
 		return
@@ -249,48 +235,49 @@ func (s *Server) handleUpdateInstance(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, instanceView{Instance: inst})
 }
 
-// recreateInstance replaces a container with one built from the instance's
-// persisted configuration.
-func (s *Server) recreateInstance(ctx context.Context, inst models.Instance) (models.Instance, error) {
-	if inst.ContainerID != "" {
-		_ = s.docker.Remove(ctx, inst.ContainerID)
+// syncInstanceHosts applies an instance's bound endpoints to its container's
+// /etc/hosts. Mock hosts always resolve to 127.0.0.1, where the guest relay
+// listens. It is a no-op for instances with no container.
+func (s *Server) syncInstanceHosts(ctx context.Context, inst models.Instance) error {
+	if inst.ContainerID == "" {
+		return nil
 	}
-	user := inst.User
-	if user == "" {
-		user = "root"
+	return s.docker.SyncHosts(ctx, inst.ContainerID, mockHosts(inst.Endpoints), "127.0.0.1")
+}
+
+// buildInstanceEnv returns the container environment for an instance: the base
+// (user) variables plus CA trust settings. Provider dummy tokens are deliberately
+// excluded — they are injected per exec session so endpoints can change live.
+func buildInstanceEnv(base map[string]string, caPEM []byte) map[string]string {
+	managed := managedProviderEnvNames()
+	env := make(map[string]string, len(base)+3)
+	for k, v := range base {
+		if _, ok := managed[k]; ok {
+			continue
+		}
+		env[k] = v
 	}
-	bridge, err := s.guestBridgeSpec()
-	if err != nil {
-		return inst, err
+	if len(caPEM) > 0 {
+		env["SSL_CERT_FILE"] = docker.GuestCAPEMPath
+		env["REQUESTS_CA_BUNDLE"] = docker.GuestCAPEMPath
+		env["NODE_EXTRA_CA_CERTS"] = docker.GuestCAPEMPath
 	}
-	mockHostIP := ""
-	if bridge != nil {
-		mockHostIP = "127.0.0.1"
+	return env
+}
+
+// managedProviderEnvNames lists the standard provider API-key variables that
+// Vivarium manages per instance (custom providers are user-configured).
+func managedProviderEnvNames() map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, p := range []models.ProviderType{
+		models.ProviderOpenAI, models.ProviderAnthropic,
+		models.ProviderDeepSeek, models.ProviderOpenRouter,
+	} {
+		if name, _ := models.ProviderEnvNames(p); name != "" {
+			out[name] = struct{}{}
+		}
 	}
-	spec := docker.ContainerSpec{
-		Name:        docker.SanitizeContainerName(inst.Name),
-		Image:       inst.BaseImageTag,
-		User:        user,
-		Env:         inst.EnvVars,
-		Mounts:      inst.Mounts,
-		GPUs:        inst.GPUs,
-		MockHosts:   mockHosts(inst.Endpoints),
-		MockHostIP:  mockHostIP,
-		Resources:   inst.Resources,
-		CACert:      s.proxy.CACertPEM,
-		GuestBridge: bridge,
-	}
-	containerID, err := s.docker.CreateAndStart(ctx, spec)
-	if err != nil {
-		return inst, err
-	}
-	inst.ContainerID = containerID
-	inst.Status = models.StatusRunning
-	inst.LastRunAt = time.Now().Unix()
-	if ip, err := s.docker.IPAddress(ctx, containerID); err == nil && ip != "" {
-		inst.IPAddress = ip
-	}
-	return inst, nil
+	return out
 }
 
 func (s *Server) resolveRecipe(req instanceCreateRequest) (models.Recipe, error) {
@@ -316,6 +303,11 @@ func (s *Server) handleStartInstance(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	if err := s.docker.Client().StartContainer(ctx, inst.ContainerID); err != nil {
 		writeError(w, http.StatusBadGateway, "start container: "+err.Error())
+		return
+	}
+	// Docker regenerates /etc/hosts on start, so re-apply the endpoint hosts.
+	if err := s.syncInstanceHosts(ctx, inst); err != nil {
+		writeError(w, http.StatusBadGateway, "sync hosts: "+err.Error())
 		return
 	}
 	bridge, err := s.guestBridgeSpec()
@@ -460,7 +452,7 @@ func (s *Server) handleConnectInstance(w http.ResponseWriter, r *http.Request) {
 	cols, _ := strconv.Atoi(r.URL.Query().Get("cols"))
 	rows, _ := strconv.Atoi(r.URL.Query().Get("rows"))
 
-	stream, execID, err := s.docker.Connect(r.Context(), inst.ContainerID, cols, rows)
+	stream, execID, err := s.docker.Connect(r.Context(), inst.ContainerID, cols, rows, providerKeyEnv(inst.Endpoints))
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "connect: "+err.Error())
 		return

@@ -12,7 +12,7 @@ frontend are implemented and tested.
 | Persistence | `internal/store` | Atomic writes, `0600` files / `0700` dirs, preset seeding. |
 | Secret storage | `internal/keyring` | `SecretStore` interface, local Argon2id + AES-256-GCM vault, libsecret over D-Bus. |
 | Auth lifecycle | `internal/auth` | `unconfigured` / `locked` / `unlocked`, setup, unlock, reset. |
-| Docker | `internal/docker` | Direct Engine API client, `vivarium-net`, GPU enum, mounts, `--add-host`, resource/file injection, detached exec, interactive exec sessions (connect), CA trust injection, guest-relay lifecycle, standard image builds. |
+| Docker | `internal/docker` | Direct Engine API client, `vivarium-net`, GPU enum, mounts, runtime `/etc/hosts` sync, live endpoint resync, resource/file injection, detached exec, interactive exec sessions (connect, per-session env), CA trust injection, guest-relay lifecycle, standard image builds. |
 | Host bridge | `internal/proxy` | Rootless TLS MITM, CA + leaf minting, endpoint registry, dummy-token validation, credential injection, rate limiting, SSE streaming. |
 | Guest relay | `cmd/vivarium-guestbridge` | Static TCP forwarder hijacking agent traffic (`127.0.0.1:443`/`:80`) to the unprivileged host bridge; embedded via `internal/guestbridge`. |
 | IPC API | `internal/api` | Full `BACKEND.md` §3 surface plus auth endpoints, `ping`, instance `PUT`, secret reveal, and per-session exec connect/resize. |
@@ -85,10 +85,16 @@ sub-editors, and base-image status/size. See `FRONTEND_PLAN.md`.
   bridge can resolve `mock_url → base_url + keyID`; only dummy tokens are
   stored, never real secrets.
 - **Transparent DNS hijack + guest relay.** The host proxy stays on the
-  unprivileged gateway ports (`:8443`/`:8080`). Each container gets
-  `--add-host <mockhost>:127.0.0.1` and a small root-started TCP relay
-  (`127.0.0.1:443`/`:80` → gateway) so agents use their **default** base URLs.
-  No host root and no `iptables`. See `PROXY.md`.
+  unprivileged gateway ports (`:8443`/`:8080`). Each container gets a small
+  root-started TCP relay (`127.0.0.1:443`/`:80` → gateway) so agents use their
+  **default** base URLs, and mock hosts are written into a managed `/etc/hosts`
+  block at runtime (`SyncHosts`). No host root and no `iptables`. See `PROXY.md`.
+- **Live endpoints (no recreate).** Changing an instance's API endpoints only
+  updates the host proxy registry, the guest `/etc/hosts`, and the provider env
+  of new exec sessions — the container is never recreated. Provider dummy tokens
+  are injected per exec (`Connect`) instead of being stored in the container
+  environment. `/etc/hosts` is re-synced after create and after every start
+  (Docker regenerates it on start).
 - **No base-URL injection.** Vivarium injects only the dummy provider API-key
   variable for standard providers; agents use their built-in defaults. Custom
   endpoints are configured by the user (Vivarium only makes `mock_url` reachable
@@ -100,6 +106,16 @@ sub-editors, and base-image status/size. See `FRONTEND_PLAN.md`.
   *container's* `/etc/group`, which often lacks `render`; the controller
   therefore passes numeric GIDs resolved from the host (`video`/`render` and
   the device-node owning groups), which is portable across images.
+- **Mounts and GPUs are fixed at creation.** Docker cannot add binds or devices
+  to a running container, and cannot mutate `Config.Env`/`HostConfig`; recreating
+  would discard the writable layer. The instance editor disables these actions
+  (grayed out) and instance creation warns when GPUs are bound; use a new
+  instance to change them. Endpoints are exempt because their effects
+  (proxy route, `/etc/hosts`, exec env) are reproducible at runtime.
+  - **TODO (future):** a privileged host-side helper could change device (and
+    mount) binding without recreating the container (for example a `mount --bind`
+    inside the container's mount namespace and a device-cgroup allowance).
+    Discouraged and not implemented.
 - **Connect = exec, not attach.** Interactive shells use Docker's exec API
   (`/containers/{id}/exec` + `/exec/{id}/start` upgrade), so every client gets
   an independent shell. Container attach (PID 1 stdio) would mirror sessions.
@@ -151,6 +167,7 @@ DELETE /recipes/{id}
 GET    /instances
 POST   /instances
 GET    /instances/{id}
+PUT    /instances/{id}                 # rename and/or rebind endpoints (live)
 POST   /instances/{id}/start
 POST   /instances/{id}/halt
 DELETE /instances/{id}

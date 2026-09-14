@@ -157,6 +157,12 @@ func (c *Controller) CreateAndStart(ctx context.Context, spec ContainerSpec) (st
 		cleanup()
 		return "", err
 	}
+	if len(spec.MockHosts) > 0 {
+		if err := c.SyncHosts(ctx, id, spec.MockHosts, spec.MockHostIP); err != nil {
+			cleanup()
+			return "", err
+		}
+	}
 	if len(spec.CACert) > 0 {
 		// Best effort: some minimal images lack update-ca-certificates; the
 		// SSL_CERT_FILE / REQUESTS_CA_BUNDLE env vars still cover common SDKs.
@@ -213,9 +219,11 @@ var connectShell = []string{"/bin/sh", "-c", "if command -v bash >/dev/null 2>&1
 // Connect opens a new interactive shell inside a running container. Unlike
 // container attach (which shares PID 1 stdio), each call creates an independent
 // exec session, so multiple clients get separate shells. It returns the raw
-// stream and the exec ID used for subsequent resizes.
-func (c *Controller) Connect(ctx context.Context, id string, cols, rows int) (io.ReadWriteCloser, string, error) {
-	execID, err := c.client.CreateExec(ctx, id, connectShell, true)
+// stream and the exec ID used for subsequent resizes. env adds (and overrides)
+// environment variables for the session, so endpoint changes do not require
+// recreating the container.
+func (c *Controller) Connect(ctx context.Context, id string, cols, rows int, env map[string]string) (io.ReadWriteCloser, string, error) {
+	execID, err := c.client.CreateExec(ctx, id, connectShell, true, envSlice(env))
 	if err != nil {
 		return nil, "", err
 	}
@@ -233,6 +241,59 @@ func (c *Controller) Connect(ctx context.Context, id string, cols, rows int) (io
 // ResizeExec sets the TTY size of an interactive exec session.
 func (c *Controller) ResizeExec(ctx context.Context, execID string, height, width int) error {
 	return c.client.ResizeExec(ctx, execID, height, width)
+}
+
+// hostMarker tags the /etc/hosts lines Vivarium manages so they can be replaced
+// without disturbing the container's own entries.
+const hostMarker = "# vivarium"
+
+// SyncHosts replaces Vivarium's managed /etc/hosts block with the given mock
+// hosts mapped to ip. Docker regenerates /etc/hosts on (re)start, so this is
+// applied after create and after every start. It never unlinks the file (which
+// is a bind mount) — it writes in place by truncation. Runs as root.
+func (c *Controller) SyncHosts(ctx context.Context, id string, hosts []string, ip string) error {
+	if ip == "" {
+		ip = "127.0.0.1"
+	}
+	var entries strings.Builder
+	for _, h := range hosts {
+		h = sanitizeHost(h)
+		if h == "" {
+			continue
+		}
+		entries.WriteString("printf '%s %s " + hostMarker + "\\n' '" + ip + "' '" + h + "' >> \"$t\"\n")
+	}
+	script := "set -e\n" +
+		"f=/etc/hosts\n" +
+		"t=/tmp/.vivarium-hosts.$$\n" +
+		"grep -v '" + hostMarker + "$' \"$f\" > \"$t\" || true\n" +
+		entries.String() +
+		"cat \"$t\" > \"$f\"\n" +
+		"rm -f \"$t\"\n"
+	code, out, err := c.client.ExecStatus(ctx, id, []string{"/bin/sh", "-c", script})
+	if err != nil {
+		return fmt.Errorf("sync hosts: %w", err)
+	}
+	if code != 0 {
+		return fmt.Errorf("sync hosts: exit %d: %s", code, strings.TrimSpace(out))
+	}
+	return nil
+}
+
+// sanitizeHost keeps only characters valid in a hostname, returning "" for
+// anything unusable.
+func sanitizeHost(h string) string {
+	h = strings.TrimSpace(h)
+	var b strings.Builder
+	for _, r := range h {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '-':
+			b.WriteRune(r)
+		default:
+			return ""
+		}
+	}
+	return b.String()
 }
 
 // injectCACert writes the CA certificate into the guest trust locations.
@@ -256,17 +317,10 @@ func (c *Controller) buildCreateRequest(spec ContainerSpec) containerCreateReque
 			ReadOnly: m.Mode == models.MountReadOnly,
 		})
 	}
-	hostIP := spec.MockHostIP
-	if hostIP == "" {
-		hostIP = c.gateway
-	}
-	extraHosts := make([]string, 0, len(spec.MockHosts))
-	for _, h := range spec.MockHosts {
-		extraHosts = append(extraHosts, h+":"+hostIP)
-	}
+	// Mock host entries are applied at runtime via SyncHosts (after create and
+	// after each start) so endpoints can change without recreating the container.
 	hc := &hostConfig{
 		Mounts:      mounts,
-		ExtraHosts:  extraHosts,
 		NetworkMode: NetworkName,
 	}
 	if len(spec.GPUs) > 0 {

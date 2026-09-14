@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"vivarium/internal/apitypes"
-	"vivarium/internal/models"
 )
 
 func TestClientMethods(t *testing.T) {
@@ -94,7 +93,7 @@ func TestClientUpdateInstance(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Errorf("decode: %v", err)
 		}
-		if req.Name != "renamed" || req.Mounts == nil || len(*req.Mounts) != 1 {
+		if req.Name != "renamed" || req.EndpointKeys == nil || len(*req.EndpointKeys) != 1 {
 			t.Errorf("unexpected req: %+v", req)
 		}
 		io.WriteString(w, `{"id":"i1","name":"renamed","status":"running","base_image_tag":"img"}`)
@@ -102,8 +101,8 @@ func TestClientUpdateInstance(t *testing.T) {
 	defer srv.Close()
 	c := NewWithHTTP(srv.URL, srv.Client())
 
-	mounts := []models.Mount{{HostPath: "/h", GuestPath: "/g", Mode: models.MountReadWrite}}
-	out, err := c.UpdateInstance(context.Background(), "i1", apitypes.InstanceUpdateRequest{Name: "renamed", Mounts: &mounts})
+	ids := []string{"k1"}
+	out, err := c.UpdateInstance(context.Background(), "i1", apitypes.InstanceUpdateRequest{Name: "renamed", EndpointKeys: &ids})
 	if err != nil || out.Name != "renamed" {
 		t.Fatalf("update = %+v, %v", out, err)
 	}

@@ -60,12 +60,12 @@ type InstanceCreateRequest struct {
 	GPUs         []models.GPU   `json:"gpus"`
 }
 
-// InstanceUpdateRequest is the body of PUT /instances/{id}. Nil slices leave
-// the existing value unchanged; a non-nil slice replaces it.
+// InstanceUpdateRequest is the body of PUT /instances/{id}. Only the name and
+// the bound API endpoints can change after creation; mounts and GPUs are fixed
+// at create time.
 type InstanceUpdateRequest struct {
-	Name   string          `json:"name"`
-	Mounts *[]models.Mount `json:"mounts"`
-	GPUs   *[]models.GPU   `json:"gpus"`
+	Name         string    `json:"name"`
+	EndpointKeys *[]string `json:"endpoint_keys"`
 }
 
 // InstanceView augments a persisted instance with live Docker data.

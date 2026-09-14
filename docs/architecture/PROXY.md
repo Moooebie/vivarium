@@ -12,11 +12,18 @@ guest** and relayed to the unprivileged host listener:
 
 ```
 agent requests  : https://api.openai.com/v1        (agent's own default URL)
-/etc/hosts      : api.openai.com -> 127.0.0.1      (--add-host)
+/etc/hosts      : api.openai.com -> 127.0.0.1      (runtime sync, see below)
 guest relay     : 127.0.0.1:443  ->  172.28.0.1:8443   (raw TCP)
                   127.0.0.1:80   ->  172.28.0.1:8080
 host proxy      : 172.28.0.1:8443 (TLS), 172.28.0.1:8080 (plain)
 ```
+
+The `/etc/hosts` entries are **not** set with `--add-host`; they are written at
+runtime by `Controller.SyncHosts` into a `# vivarium`-marked block, so endpoints
+can change without recreating the container. Docker regenerates `/etc/hosts` on
+start, so the block is re-applied after create and after every start. Provider
+dummy tokens are likewise injected per exec session (`Connect`), not baked into
+the container environment.
 
 - The relay is a tiny static Go binary (`cmd/vivarium-guestbridge`), injected at
   `/usr/local/bin/vivarium-guestbridge` and started detached **as root** after
@@ -118,4 +125,5 @@ live container IPs from Docker.
 interception or `iptables` `REDIRECT`. Because the daemon is unprivileged,
 Vivarium instead hijacks to `127.0.0.1` and runs a guest-side relay to the
 unprivileged gateway ports, achieving the same transparent behavior without
-root.
+root. The host entries are applied to `/etc/hosts` at runtime (rather than via
+`--add-host`) so endpoints can be rebound live.

@@ -349,8 +349,8 @@ func TestInstanceRegistersEndpoints(t *testing.T) {
 	if !strings.HasPrefix(view.Endpoints[0].Token, "viv-tok-") {
 		t.Fatalf("unexpected token %q", view.Endpoints[0].Token)
 	}
-	if view.EnvVars["OPENAI_API_KEY"] == "" {
-		t.Fatal("expected dummy API key env var")
+	if _, ok := view.EnvVars["OPENAI_API_KEY"]; ok {
+		t.Fatal("provider key must be injected per exec, not stored in the container env")
 	}
 	if _, ok := view.EnvVars["OPENAI_BASE_URL"]; ok {
 		t.Fatal("base URLs must not be injected")
@@ -416,7 +416,7 @@ func TestAPIKeySecretReveal(t *testing.T) {
 	}
 }
 
-func TestUpdateInstanceRenameAndMount(t *testing.T) {
+func TestUpdateInstanceRenameAndEndpoints(t *testing.T) {
 	env := newTestEnv(t)
 	resp, body := env.do(t, http.MethodPost, "/api/v1/instances", instanceCreateRequest{
 		Name: "dev", BaseImageTag: "vivarium/ubuntu:latest",
@@ -427,6 +427,18 @@ func TestUpdateInstanceRenameAndMount(t *testing.T) {
 	var view instanceView
 	json.Unmarshal(body, &view)
 
+	k1 := models.APIKey{ID: "k1", Name: "K1", ProviderType: models.ProviderOpenAI,
+		BaseURL: "https://api.openai.com/v1", MockURL: "https://api.openai.com/v1", CreatedAt: 1}
+	if err := env.store.PutAPIKey(k1); err != nil {
+		t.Fatal(err)
+	}
+	env.storeSecret(t, "k1", "sk-1")
+	k2 := models.APIKey{ID: "k2", Name: "K2", ProviderType: models.ProviderDeepSeek,
+		BaseURL: "https://api.deepseek.com/v1", MockURL: "https://api.deepseek.com/v1", CreatedAt: 1}
+	if err := env.store.PutAPIKey(k2); err != nil {
+		t.Fatal(err)
+	}
+
 	// Rename only: no recreation.
 	resp, body = env.do(t, http.MethodPut, "/api/v1/instances/"+view.ID,
 		instanceUpdateRequest{Name: "renamed"})
@@ -434,20 +446,39 @@ func TestUpdateInstanceRenameAndMount(t *testing.T) {
 		t.Fatalf("rename = %d %s", resp.StatusCode, body)
 	}
 
-	// Adding a mount triggers recreation.
-	mounts := []models.Mount{{HostPath: "/tmp/host", GuestPath: "/mnt/x", Mode: models.MountReadWrite}}
+	// Bind an endpoint: live, no recreation.
+	ids := []string{"k1"}
 	resp, body = env.do(t, http.MethodPut, "/api/v1/instances/"+view.ID,
-		instanceUpdateRequest{Mounts: &mounts})
+		instanceUpdateRequest{EndpointKeys: &ids})
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("mount update = %d %s", resp.StatusCode, body)
+		t.Fatalf("endpoint update = %d %s", resp.StatusCode, body)
 	}
 	var updated instanceView
 	json.Unmarshal(body, &updated)
-	if len(updated.Mounts) != 1 || updated.Mounts[0].GuestPath != "/mnt/x" {
-		t.Fatalf("mounts = %+v", updated.Mounts)
+	if len(updated.Endpoints) != 1 || updated.Endpoints[0].KeyID != "k1" || updated.Endpoints[0].Token == "" {
+		t.Fatalf("endpoints = %+v", updated.Endpoints)
 	}
-	if updated.Status != models.StatusRunning {
-		t.Fatalf("status = %q", updated.Status)
+	if updated.ContainerID != view.ContainerID {
+		t.Fatalf("container recreated: %s -> %s", view.ContainerID, updated.ContainerID)
+	}
+	if _, ok := updated.EnvVars["OPENAI_API_KEY"]; ok {
+		t.Fatal("provider key must not be stored in the container env")
+	}
+
+	// A key without a stored secret is rejected.
+	missing := []string{"k2"}
+	resp, _ = env.do(t, http.MethodPut, "/api/v1/instances/"+view.ID,
+		instanceUpdateRequest{EndpointKeys: &missing})
+	if resp.StatusCode != http.StatusPreconditionFailed {
+		t.Fatalf("missing secret = %d", resp.StatusCode)
+	}
+
+	// An unknown key is rejected.
+	unknown := []string{"nope"}
+	resp, _ = env.do(t, http.MethodPut, "/api/v1/instances/"+view.ID,
+		instanceUpdateRequest{EndpointKeys: &unknown})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown key = %d", resp.StatusCode)
 	}
 }
 
@@ -481,7 +512,7 @@ func TestRelayForwards(t *testing.T) {
 	}
 }
 
-func TestInstanceInjectsProviderKeyOnly(t *testing.T) {
+func TestInstanceBindsEndpointWithoutContainerKeyEnv(t *testing.T) {
 	env := newTestEnv(t)
 	env.server.SetProxyBinding(ProxyBinding{CACertPEM: []byte("cert"), TLSPort: 8443, HTTPPort: 8080})
 	key := models.APIKey{
@@ -498,8 +529,10 @@ func TestInstanceInjectsProviderKeyOnly(t *testing.T) {
 	}
 	var view instanceView
 	json.Unmarshal(body, &view)
-	if view.EnvVars["OPENAI_API_KEY"] == "" {
-		t.Fatal("expected the dummy API key env var")
+	// The provider dummy key is injected per exec session, not stored in the
+	// container environment, so endpoints can change without a recreate.
+	if _, ok := view.EnvVars["OPENAI_API_KEY"]; ok {
+		t.Fatal("provider key must not be stored in the container env")
 	}
 	if _, ok := view.EnvVars["OPENAI_BASE_URL"]; ok {
 		t.Fatal("base URL must not be injected")
@@ -509,6 +542,9 @@ func TestInstanceInjectsProviderKeyOnly(t *testing.T) {
 	}
 	if view.EnvVars["SSL_CERT_FILE"] == "" {
 		t.Fatal("expected CA trust env var")
+	}
+	if len(view.Endpoints) != 1 || view.Endpoints[0].KeyID != "k1" || view.Endpoints[0].Token == "" {
+		t.Fatalf("expected a bound endpoint with a dummy token, got %+v", view.Endpoints)
 	}
 }
 

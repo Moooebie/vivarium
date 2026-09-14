@@ -87,7 +87,10 @@ func TestIntegrationProxyEndToEnd(t *testing.T) {
 		Cmd:       []string{"sleep", "120"},
 		Env:       map[string]string{"OPENAI_API_BASE": "https://api.openai.com:" + port + "/v1"},
 		MockHosts: []string{"api.openai.com"},
-		CACert:    ca.CertPEM(),
+		// This test drives the host proxy directly (no guest relay), so the mock
+		// host points at the gateway rather than 127.0.0.1.
+		MockHostIP: docker.NetworkGateway,
+		CACert:     ca.CertPEM(),
 	})
 	if err != nil {
 		t.Fatalf("create container: %v", err)

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strings"
 
@@ -317,7 +318,7 @@ func (s *recipeEditorScreen) dispatch(action string) tea.Cmd {
 			return nil
 		}))
 	case "endpoints":
-		return push(newEndpointsEditorScreen(s.app, s))
+		return push(newEndpointsEditorScreen(s.app, recipeEndpointsHost{s}, nil, nil))
 	case "mounts":
 		return push(newMountsEditorScreen(s.app, "Mount Points", s.recipe.DefaultMounts, func(ms []models.Mount) tea.Cmd {
 			s.recipe.DefaultMounts = ms
@@ -363,57 +364,30 @@ func (s *recipeEditorScreen) baseImageName() string {
 	return s.recipe.BaseImageID
 }
 
-func (s *recipeEditorScreen) findKey(id string) (models.APIKey, bool) {
-	for _, k := range s.keys {
-		if k.ID == id {
-			return k.APIKey, true
-		}
-	}
-	return models.APIKey{}, false
-}
+// recipeEndpointsHost adapts a recipe being edited in memory to the shared
+// endpoints editor. Persistence happens when the recipe is saved.
+type recipeEndpointsHost struct{ ed *recipeEditorScreen }
 
-func (s *recipeEditorScreen) keyItems() []menuItem {
-	items := make([]menuItem, 0, len(s.keys))
-	for _, k := range s.keys {
-		items = append(items, menuItem{Key: k.ID, Label: k.Name, Detail: k.MockURL})
-	}
-	if len(items) == 0 {
-		items = append(items, menuItem{Header: true, Label: "NO SAVED API KEYS — define one inline"})
-	}
-	return items
+func (h recipeEndpointsHost) Endpoints() []models.APIKey { return h.ed.recipe.APIEndpoints }
+func (h recipeEndpointsHost) SetEndpoints(eps []models.APIKey) {
+	h.ed.recipe.APIEndpoints = eps
 }
-
-func (s *recipeEditorScreen) addEndpoint(k models.APIKey) {
-	for _, e := range s.recipe.APIEndpoints {
+func (h recipeEndpointsHost) SavedKeys() []apitypes.APIKeyView { return h.ed.keys }
+func (h recipeEndpointsHost) SetSavedKeys(keys []apitypes.APIKeyView) {
+	h.ed.keys = keys
+}
+func (h recipeEndpointsHost) AddEndpoint(k models.APIKey) error {
+	for _, e := range h.ed.recipe.APIEndpoints {
 		if e.MockURL == k.MockURL {
-			s.err = "an endpoint with that mock_url already exists"
-			return
+			return errors.New("an endpoint with that mock_url already exists")
 		}
 	}
-	s.recipe.APIEndpoints = append(s.recipe.APIEndpoints, k)
-	s.applyProviderEnv(k)
-	s.err = ""
-	s.changed = true
-	s.refreshActionLabels()
+	h.ed.recipe.APIEndpoints = append(h.ed.recipe.APIEndpoints, k)
+	return nil
 }
-
-// applyProviderEnv adds the provider API-key placeholder for a non-custom
-// provider. Base URLs are not added: the guest relay makes the mock_url
-// reachable and the backend injects the real dummy token per instance.
-func (s *recipeEditorScreen) applyProviderEnv(k models.APIKey) {
-	if k.ProviderType == models.ProviderCustom {
-		return
-	}
-	keyVar, _ := models.ProviderEnvNames(k.ProviderType)
-	if keyVar == "" {
-		return
-	}
-	if s.recipe.EnvVars == nil {
-		s.recipe.EnvVars = map[string]string{}
-	}
-	if _, ok := s.recipe.EnvVars[keyVar]; !ok {
-		s.recipe.EnvVars[keyVar] = "viv-dummy-key"
-	}
+func (h recipeEndpointsHost) OnChanged() {
+	h.ed.changed = true
+	h.ed.refreshActionLabels()
 }
 
 func (s *recipeEditorScreen) commit() {

@@ -131,20 +131,33 @@ func TestDeepSeekAgentHelloWorld(t *testing.T) {
 	}
 
 	// Resolve the agent binary robustly (some images only ship it under
-	// ~/.opencode/bin without a PATH symlink).
-	out, err := dc.Client().Exec(ctx, inst.ContainerID, []string{
+	// ~/.opencode/bin without a PATH symlink). The provider dummy token is
+	// injected into the exec session, mirroring the TUI's Connect flow.
+	out, err := dc.Client().ExecEnv(ctx, inst.ContainerID, []string{
 		"sh", "-c",
 		`if command -v opencode >/dev/null 2>&1; then OC=opencode; ` +
 			`elif [ -x /root/.opencode/bin/opencode ]; then OC=/root/.opencode/bin/opencode; ` +
 			`else echo "opencode not found"; exit 127; fi; ` +
 			`exec "$OC" run -m deepseek/deepseek-v4-flash "Reply with exactly: hello world"`,
-	})
+	}, providerEnv(inst))
 	if err != nil {
 		t.Fatalf("opencode run: %v (output %q)", err, out)
 	}
 	if !strings.Contains(strings.ToLower(out), "hello world") {
 		t.Fatalf("agent did not reply 'hello world': %q", out)
 	}
+}
+
+// providerEnv rebuilds the dummy provider environment for an instance's bound
+// endpoints, mirroring the env injected by Connect.
+func providerEnv(inst apitypes.InstanceView) []string {
+	var env []string
+	for _, ep := range inst.Endpoints {
+		if name, _ := models.ProviderEnvNames(ep.ProviderType); name != "" {
+			env = append(env, name+"="+ep.Token)
+		}
+	}
+	return env
 }
 
 func portOf(addr string) int {

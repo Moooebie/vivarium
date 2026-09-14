@@ -114,7 +114,6 @@ type containerCreateRequest struct {
 type hostConfig struct {
 	Binds       []string        `json:"Binds,omitempty"`
 	Mounts      []mountSpec     `json:"Mounts,omitempty"`
-	ExtraHosts  []string        `json:"ExtraHosts,omitempty"`
 	Devices     []deviceMapping `json:"Devices,omitempty"`
 	GroupAdd    []string        `json:"GroupAdd,omitempty"`
 	SecurityOpt []string        `json:"SecurityOpt,omitempty"`
@@ -151,6 +150,7 @@ type execCreateRequest struct {
 	AttachStdin  bool     `json:"AttachStdin"`
 	Tty          bool     `json:"Tty"`
 	Cmd          []string `json:"Cmd"`
+	Env          []string `json:"Env,omitempty"`
 	User         string   `json:"User,omitempty"`
 }
 
