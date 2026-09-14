@@ -11,7 +11,7 @@ frontend are implemented and tested.
 | Path resolution | `internal/paths` | XDG data/state dirs, socket path, `/tmp` fallback, daemon log/PID paths. |
 | Persistence | `internal/store` | Atomic writes, `0600` files / `0700` dirs, preset seeding. |
 | Secret storage | `internal/keyring` | `SecretStore` interface, local Argon2id + AES-256-GCM vault, libsecret over D-Bus. |
-| Auth lifecycle | `internal/auth` | `unconfigured` / `locked` / `unlocked`, setup, unlock, reset, idle auto-lock. |
+| Auth lifecycle | `internal/auth` | `unconfigured` / `locked` / `unlocked`, setup, unlock, reset. |
 | Docker | `internal/docker` | Direct Engine API client, `vivarium-net`, GPU enum, mounts, `--add-host`, resource/file injection, detached exec, interactive exec sessions (connect), CA trust injection, guest-relay lifecycle, standard image builds. |
 | Host bridge | `internal/proxy` | Rootless TLS MITM, CA + leaf minting, endpoint registry, dummy-token validation, credential injection, rate limiting, SSE streaming. |
 | Guest relay | `cmd/vivarium-guestbridge` | Static TCP forwarder hijacking agent traffic (`127.0.0.1:443`/`:80`) to the unprivileged host bridge; embedded via `internal/guestbridge`. |
@@ -20,13 +20,39 @@ frontend are implemented and tested.
 | API client | `internal/client` | Typed Unix-socket client with exec connect upgrade. |
 | TUI | `internal/tui` | Bubble Tea frontend: auth, Main, Instances, Wizard, Edit, Recipes, API Keys, Base Images, Connection Info, connect shell. Unified vertical row forms; recipe editor drill-down pages. |
 | Daemon | `internal/daemon` | Unix socket listener, `flock` single-instance lock, PID file, bridge lifecycle, graceful shutdown. |
-| CLI | `cmd/vivarium` | Default TUI with detached auto-spawned backend; `--daemon`, `--stop`, `--idle-lock`, `--version`, `--socket`, reset flags, proxy flags. |
+| CLI | `cmd/vivarium` | Default TUI with detached auto-spawned backend; `--daemon`, `--stop`, `--version`, `--socket`, reset flags, proxy flags. |
 
 See `PROXY.md` for the bridge design and `FRONTEND_PLAN.md` for the TUI.
 
 ## Deferred / Follow-ups
 
 - Optional: mock D-Bus Secret Service test harness (`dbusmock`).
+
+### libsecret disabled (UI)
+
+The TUI now offers only the encrypted vault. The libsecret backend remains in
+`internal/keyring` (and is still reachable through `POST /auth/setup`), but it is
+hidden in the UI pending fixes. Observed problems and the intended fixes:
+
+- **Ephemeral collection risk.** Items created before the persistent-collection
+  fix could live in the `session` collection, which is wiped when the keyring
+  session ends, leaving JSON metadata pointing at a secret that no longer
+  exists (the reported "keys vaporate"). Ensure storage always targets a
+  persistent collection and verify the created item's collection after write.
+- **Alias-dependent exclusion.** `choosePersistentCollection` excludes the
+  session collection only via the `session` alias; if that alias is unreadable
+  the ephemeral collection can be selected. Exclude
+  `/org/freedesktop/secrets/collection/session` by absolute path instead.
+- **Connection lifecycle.** `LibSecret` uses the shared `godbus` session
+  connection and never reconnects; if gnome-keyring restarts or the session is
+  invalidated, lookups fail until the process restarts. Own a private,
+  reconnectable connection and retry once on transient errors.
+- **Bus identity.** Different run contexts (SSH vs desktop) can have different
+  `DBUS_SESSION_BUS_ADDRESS`, so the same user sees different keyrings. Log the
+  bus address and resolved collection at startup.
+
+Until these are addressed, use the vault. See also the `keyring` integration
+tests, which still exercise libsecret directly.
 
 The frontend completion work (M6) is done: nav/edit fields, clickable
 dual-control buttons, working indicator, discard prompts, mouse
@@ -83,9 +109,16 @@ sub-editors, and base-image status/size. See `FRONTEND_PLAN.md`.
   with `setsid` (logging to `$XDG_STATE_HOME/vivarium/daemon.log`) so it
   outlives the TUI and can be shared by multiple terminals. The daemon writes a
   PID file for `--stop`. An in-process fallback remains if spawning fails.
-- **Idle auto-lock.** With the vault backend the daemon locks the vault after
-  `--idle-lock` (default 15m) without secret access; libsecret is owned by the
-  desktop keyring and is unaffected.
+- **No vault auto-lock.** The vault stays unlocked for the daemon's lifetime;
+  there is no idle re-lock. This avoids the vault appearing to "lose" secrets
+  mid-session (a locked store previously surfaced as `has_secret=false`).
+- **Secret state, not a boolean.** `GET /api-keys` reports `secret_state`
+  (`ok` / `locked` / `missing` / `error`) so a locked store is never mistaken
+  for a missing secret. The TUI badges them distinctly (`MISSING`,
+  `LOCKED`, `SECRET ERROR`) and offers an unlock action.
+- **Startup secret audit.** The daemon logs any API key whose secret is absent
+  (`keyring.ErrNotFound`) at startup, so a lost credential is visible
+  immediately instead of surfacing later as proxy failures.
 
 ## API Surface
 

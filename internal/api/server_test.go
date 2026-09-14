@@ -664,14 +664,42 @@ func TestListAPIKeysHasSecretFlag(t *testing.T) {
 		t.Fatal(err)
 	}
 	flags := map[string]bool{}
+	states := map[string]string{}
 	for _, v := range views {
 		flags[v.Name] = v.HasSecret
+		states[v.Name] = v.SecretState
 	}
 	if !flags["WithSecret"] {
 		t.Fatal("key with a stored secret should report has_secret=true")
 	}
 	if flags["NoSecret"] {
 		t.Fatal("key without a secret should report has_secret=false")
+	}
+	if states["WithSecret"] != apitypes.SecretOK {
+		t.Fatalf("WithSecret state = %q, want ok", states["WithSecret"])
+	}
+	if states["NoSecret"] != apitypes.SecretMissing {
+		t.Fatalf("NoSecret state = %q, want missing", states["NoSecret"])
+	}
+
+	// A locked vault must report "locked", not "missing".
+	if err := env.auth.Vault().Lock(); err != nil {
+		t.Fatal(err)
+	}
+	resp, body = env.do(t, http.MethodGet, "/api/v1/api-keys", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list (locked) = %d", resp.StatusCode)
+	}
+	if err := json.Unmarshal(body, &views); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range views {
+		if v.SecretState != apitypes.SecretLocked {
+			t.Fatalf("%s state = %q, want locked", v.Name, v.SecretState)
+		}
+		if v.HasSecret {
+			t.Fatalf("%s has_secret should be false while locked", v.Name)
+		}
 	}
 }
 

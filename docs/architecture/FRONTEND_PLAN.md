@@ -16,6 +16,11 @@ the backend Unix-socket API and shares wire types with it.
   container recreation when mounts/GPUs change.
 - **Secret reveal** is supported by `GET /api/v1/api-keys/{id}/secret` (the
   socket is mode `0600`).
+- **Vault-only setup.** The first-run flow goes straight to setting a master
+  password; the libsecret/System Keyring option is hidden (see
+  `STATUS.md` → "libsecret disabled"). The key list reports a `secret_state`
+  (`ok`/`locked`/`missing`/`error`) and badges each distinctly, with `u` to
+  unlock a locked vault from the Main and API Keys screens.
 
 ## Package Layout
 

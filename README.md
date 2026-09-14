@@ -21,7 +21,14 @@ terminals can share it. `--daemon` runs the backend headless in the foreground,
 - Linux (x86_64) with Docker Engine
 - Go 1.24+ (module targets 1.26)
 - Optional: AMD ROCm/DRI drivers for GPU passthrough
-- Optional: a running D-Bus Secret Service for the `libsecret` backend
+
+## Secret storage
+
+The TUI configures the **local encrypted vault** only (master password,
+Argon2id + AES-256-GCM). The libsecret/Secret Service backend still exists in
+`internal/keyring` and is reachable through the API, but it is hidden in the UI
+while its reliability issues are resolved — see
+`docs/architecture/STATUS.md` ("libsecret disabled").
 
 ## Build
 
@@ -45,10 +52,9 @@ so a plain `go build`/`go test` works without it.
 ./vivarium --reset-credentials  # wipe keys and reset encryption (--yes to skip prompt)
 ```
 
-On first launch, choose **System Keyring** or a **Local Encrypted Vault** and set
-a master password. The host bridge binds the `vivarium-net` gateway on
-`172.28.0.1:8443` (TLS) and `:8080` (plain). With the vault backend the daemon
-re-locks after 15 minutes of inactivity (`--idle-lock`).
+On first launch, set a **master password** for the local encrypted vault
+(Argon2id + AES-256-GCM). The host bridge binds the `vivarium-net` gateway on
+`172.28.0.1:8443` (TLS) and `:8080` (plain).
 
 ### Flags
 
@@ -57,7 +63,6 @@ re-locks after 15 minutes of inactivity (`--idle-lock`).
 | `--socket PATH` | XDG runtime path | Override the backend Unix socket. |
 | `--daemon` | `false` | Run the backend without the TUI. |
 | `--stop` | `false` | Stop a running backend daemon and exit. |
-| `--idle-lock DUR` | `15m` | Lock the vault after this much inactivity (`0` disables). |
 | `--version` | | Print the version and exit. |
 | `--reset-credentials`, `--reset-vault` | | Delete API keys and reset encryption. |
 | `--yes` | `false` | Skip confirmation prompts. |

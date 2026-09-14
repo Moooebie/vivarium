@@ -81,6 +81,8 @@ func (s *mainScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 			return s, push(newAPIKeysScreen(s.app))
 		case "4":
 			return s, push(newBaseImagesScreen(s.app))
+		case "u":
+			return s, push(newAuthScreen(s.app))
 		case "q", "Q":
 			return s, tea.Quit
 		}
@@ -128,7 +130,7 @@ func (s *mainScreen) View() string {
 	b.WriteString("\n")
 	s.menu.setSize(s.app.width, len(s.menu.items))
 	b.WriteString(s.menu.view())
-	b.WriteString("\n\n" + s.app.helpBar("↑/↓ select", "Enter open", "q quit"))
+	b.WriteString("\n\n" + s.app.helpBar("↑/↓ select", "Enter open", "u unlock", "q quit"))
 	return b.String()
 }
 

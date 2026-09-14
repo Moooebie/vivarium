@@ -27,10 +27,21 @@ type APIKeyPayload struct {
 	Secret string `json:"secret"`
 }
 
-// APIKeyView augments API key metadata with whether a secret is stored.
+// Secret-state values reported for an API key. They distinguish a missing
+// secret from a locked or temporarily unavailable store.
+const (
+	SecretOK      = "ok"
+	SecretLocked  = "locked"
+	SecretMissing = "missing"
+	SecretError   = "error"
+)
+
+// APIKeyView augments API key metadata with the state of its stored secret.
 type APIKeyView struct {
 	models.APIKey
-	HasSecret bool `json:"has_secret"`
+	HasSecret   bool   `json:"has_secret"`
+	SecretState string `json:"secret_state"`
+	SecretError string `json:"secret_error,omitempty"`
 }
 
 // SecretResponse is returned by GET /api-keys/{id}/secret.

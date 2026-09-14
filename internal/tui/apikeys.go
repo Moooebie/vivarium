@@ -69,14 +69,24 @@ func (s *apiKeysScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		s.err = ""
 		s.keys = msg.keys
 		items := make([]menuItem, 0, len(msg.keys))
+		missing, locked := 0, 0
 		for _, k := range msg.keys {
 			detail := string(k.ProviderType) + "  ·  " + k.MockURL
 			if k.RateLimitRPM > 0 {
 				detail += "  ·  " + strconv.Itoa(k.RateLimitRPM) + " rpm"
 			}
 			item := menuItem{Key: "key:" + k.ID, Label: k.Name, Detail: detail}
-			if !k.HasSecret {
-				item.Badge = "NO SECRET"
+			switch secretStateOf(k) {
+			case apitypes.SecretMissing:
+				item.Badge = "MISSING"
+				item.BadgeColor = lipgloss.Color("214")
+				missing++
+			case apitypes.SecretLocked:
+				item.Badge = "LOCKED"
+				item.BadgeColor = lipgloss.Color("39")
+				locked++
+			case apitypes.SecretError:
+				item.Badge = "SECRET ERROR"
 				item.BadgeColor = lipgloss.Color("203")
 			}
 			items = append(items, item)
@@ -86,6 +96,12 @@ func (s *apiKeysScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		}
 		s.menu.setItems(items)
 		s.menu.setSize(s.app.width, maxInt(1, s.app.height-6))
+		switch {
+		case missing > 0:
+			return s, setStatus(itoa(missing)+" API key(s) have no stored secret — re-enter them", true)
+		case locked > 0:
+			return s, setStatus("vault is locked — press u to unlock", true)
+		}
 		return s, nil
 	case apiKeysActionMsg:
 		cmd := s.load()
@@ -121,6 +137,8 @@ func (s *apiKeysScreen) handleKey(msg tea.KeyMsg) (Screen, tea.Cmd) {
 		return s, pop()
 	case "r":
 		return s, s.load()
+	case "u":
+		return s, push(newAuthScreen(s.app))
 	case "n":
 		return s, push(newAPIKeyFormScreen(s.app, nil))
 	case "e", "enter":
@@ -170,8 +188,20 @@ func (s *apiKeysScreen) View() string {
 	}
 	s.menu.setTop(2)
 	b.WriteString(s.menu.view())
-	b.WriteString("\n\n" + s.app.helpBar("n new", "e edit", "d delete", "t test", "r refresh", "Esc back"))
+	b.WriteString("\n\n" + s.app.helpBar("n new", "e edit", "d delete", "t test", "u unlock", "r refresh", "Esc back"))
 	return b.String()
+}
+
+// secretStateOf reports a key's secret state, tolerating older backends that
+// only populate HasSecret.
+func secretStateOf(k apitypes.APIKeyView) string {
+	if k.SecretState != "" {
+		return k.SecretState
+	}
+	if k.HasSecret {
+		return apitypes.SecretOK
+	}
+	return apitypes.SecretMissing
 }
 
 // ---- API key form ----
@@ -492,8 +522,15 @@ func (s *apiKeyFormScreen) View() string {
 	}
 	s.form.setTop(2)
 	b.WriteString(s.form.view() + "\n")
-	if s.editing != nil && !s.editing.HasSecret {
-		b.WriteString("\n" + t.Error.Render("No secret is stored for this key — enter one and save.") + "\n")
+	if s.editing != nil {
+		switch secretStateOf(*s.editing) {
+		case apitypes.SecretMissing:
+			b.WriteString("\n" + t.Error.Render("No secret is stored for this key — enter one and save.") + "\n")
+		case apitypes.SecretLocked:
+			b.WriteString("\n" + t.Dim.Render("The vault is locked — press u on the key list to unlock, or enter a new secret.") + "\n")
+		case apitypes.SecretError:
+			b.WriteString("\n" + t.Error.Render("Secret lookup failed: "+s.editing.SecretError) + "\n")
+		}
 	}
 	if s.err != "" {
 		b.WriteString("\n" + t.Error.Render(s.err) + "\n")

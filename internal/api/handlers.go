@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"vivarium/internal/apitypes"
 	"vivarium/internal/keyring"
 	"vivarium/internal/models"
 	"vivarium/internal/version"
@@ -170,8 +172,21 @@ func (s *Server) handleListAPIKeys(w http.ResponseWriter, r *http.Request) {
 	}
 	views := make([]apiKeyView, len(keys))
 	for i, k := range keys {
-		_, err := s.auth.Secret(k.ID)
-		views[i] = apiKeyView{APIKey: k, HasSecret: err == nil}
+		views[i] = apiKeyView{APIKey: k, SecretState: apitypes.SecretMissing}
+		_, secretErr := s.auth.Secret(k.ID)
+		switch {
+		case secretErr == nil:
+			views[i].HasSecret = true
+			views[i].SecretState = apitypes.SecretOK
+		case errors.Is(secretErr, keyring.ErrLocked):
+			views[i].SecretState = apitypes.SecretLocked
+		case errors.Is(secretErr, keyring.ErrNotFound):
+			views[i].SecretState = apitypes.SecretMissing
+		default:
+			views[i].SecretState = apitypes.SecretError
+			views[i].SecretError = secretErr.Error()
+			log.Printf("api: secret lookup failed for key %s: %v", k.ID, secretErr)
+		}
 	}
 	writeJSON(w, http.StatusOK, views)
 }

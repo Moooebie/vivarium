@@ -400,3 +400,39 @@ func TestFormatHelpers(t *testing.T) {
 		t.Fatalf("formatAgo(0) = %q", got)
 	}
 }
+
+func TestAPIKeySecretStateBadges(t *testing.T) {
+	app := &App{ctx: &Context{Client: &fakeAPI{}}, theme: DefaultTheme(), spinner: spinner.New()}
+	s := newAPIKeysScreen(app)
+	s.Update(apiKeysLoadedMsg{keys: []apitypes.APIKeyView{
+		{APIKey: models.APIKey{ID: "ok", Name: "Ok"}, SecretState: apitypes.SecretOK},
+		{APIKey: models.APIKey{ID: "missing", Name: "Missing"}, SecretState: apitypes.SecretMissing},
+		{APIKey: models.APIKey{ID: "locked", Name: "Locked"}, SecretState: apitypes.SecretLocked},
+		{APIKey: models.APIKey{ID: "err", Name: "Err"}, SecretState: apitypes.SecretError, SecretError: "boom"},
+	}})
+
+	badges := map[string]string{}
+	for _, it := range s.menu.items {
+		badges[it.Label] = it.Badge
+	}
+	if badges["Ok"] != "" {
+		t.Fatalf("ok badge = %q, want none", badges["Ok"])
+	}
+	if badges["Missing"] != "MISSING" {
+		t.Fatalf("missing badge = %q", badges["Missing"])
+	}
+	if badges["Locked"] != "LOCKED" {
+		t.Fatalf("locked badge = %q", badges["Locked"])
+	}
+	if badges["Err"] != "SECRET ERROR" {
+		t.Fatalf("error badge = %q", badges["Err"])
+	}
+
+	// Older backends that only set HasSecret are still classified.
+	if got := secretStateOf(apitypes.APIKeyView{HasSecret: true}); got != apitypes.SecretOK {
+		t.Fatalf("legacy has-secret state = %q", got)
+	}
+	if got := secretStateOf(apitypes.APIKeyView{}); got != apitypes.SecretMissing {
+		t.Fatalf("legacy no-secret state = %q", got)
+	}
+}

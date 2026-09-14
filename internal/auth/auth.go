@@ -3,11 +3,9 @@
 package auth
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"sync"
-	"time"
 
 	"vivarium/internal/keyring"
 	"vivarium/internal/models"
@@ -35,9 +33,6 @@ type Manager struct {
 	vault     *keyring.Vault
 	libsecret *keyring.LibSecret
 	mu        sync.Mutex
-
-	useMu   sync.Mutex
-	lastUse time.Time
 }
 
 // NewManager builds a Manager rooted at the given store and vault path.
@@ -123,7 +118,6 @@ func (m *Manager) Unlock(password string) error {
 
 // Secrets returns the active secret store, or ErrLocked when unavailable.
 func (m *Manager) Secrets() (keyring.Store, error) {
-	m.Touch()
 	cfg, err := m.store.Config()
 	if err != nil {
 		return nil, err
@@ -195,65 +189,4 @@ func (m *Manager) Reset() error {
 func (m *Manager) Close() error {
 	_ = m.vault.Lock()
 	return m.libsecret.Close()
-}
-
-// Lock zeroes the unlocked vault key material. It is a no-op for the libsecret
-// backend, whose secrets are owned by the desktop keyring.
-func (m *Manager) Lock() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	cfg, err := m.store.Config()
-	if err != nil {
-		return err
-	}
-	if cfg.Configured && cfg.SecretStorageType == models.SecretVault {
-		return m.vault.Lock()
-	}
-	return nil
-}
-
-// Touch records secret-store activity for the idle-lock timer.
-func (m *Manager) Touch() {
-	m.useMu.Lock()
-	m.lastUse = time.Now()
-	m.useMu.Unlock()
-}
-
-func (m *Manager) lastActivity() time.Time {
-	m.useMu.Lock()
-	defer m.useMu.Unlock()
-	return m.lastUse
-}
-
-// AutoLock locks the vault once timeout has elapsed with no secret access. A
-// non-positive timeout disables auto-locking. It blocks until ctx is cancelled.
-func (m *Manager) AutoLock(ctx context.Context, timeout time.Duration) {
-	if timeout <= 0 {
-		return
-	}
-	m.Touch()
-	interval := timeout
-	if interval > time.Minute {
-		interval = time.Minute
-	}
-	if interval < 100*time.Millisecond {
-		interval = 100 * time.Millisecond
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if time.Since(m.lastActivity()) < timeout {
-				continue
-			}
-			status, err := m.Status()
-			if err != nil || status != StatusUnlocked {
-				continue
-			}
-			_ = m.Lock()
-		}
-	}
 }

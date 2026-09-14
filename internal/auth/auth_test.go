@@ -1,11 +1,9 @@
 package auth
 
 import (
-	"context"
 	"errors"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"vivarium/internal/keyring"
 	"vivarium/internal/models"
@@ -80,59 +78,4 @@ func TestSetupUnknownBackend(t *testing.T) {
 	if err := m.Setup("mystery", "pw"); err == nil {
 		t.Fatal("expected unknown backend error")
 	}
-}
-
-func TestLock(t *testing.T) {
-	m := newManager(t)
-	if err := m.Setup(models.SecretVault, "pw"); err != nil {
-		t.Fatal(err)
-	}
-	if err := m.Lock(); err != nil {
-		t.Fatal(err)
-	}
-	if s, _ := m.Status(); s != StatusLocked {
-		t.Fatalf("Status = %q, want locked", s)
-	}
-}
-
-func TestAutoLock(t *testing.T) {
-	m := newManager(t)
-	if err := m.Setup(models.SecretVault, "pw"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := m.Secrets(); err != nil {
-		t.Fatal(err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan struct{})
-	go func() {
-		m.AutoLock(ctx, 150*time.Millisecond)
-		close(done)
-	}()
-
-	// Activity should keep the vault unlocked past the timeout.
-	time.Sleep(80 * time.Millisecond)
-	if _, err := m.Secrets(); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(80 * time.Millisecond)
-	if s, _ := m.Status(); s != StatusUnlocked {
-		t.Fatalf("Status = %q, want unlocked while active", s)
-	}
-
-	// After going idle it must lock.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if s, _ := m.Status(); s == StatusLocked {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if s, _ := m.Status(); s != StatusLocked {
-		t.Fatalf("Status = %q, want locked after idle", s)
-	}
-	cancel()
-	<-done
 }

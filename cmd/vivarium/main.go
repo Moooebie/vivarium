@@ -24,6 +24,7 @@ import (
 	"vivarium/internal/client"
 	"vivarium/internal/daemon"
 	"vivarium/internal/docker"
+	"vivarium/internal/keyring"
 	"vivarium/internal/paths"
 	"vivarium/internal/proxy"
 	"vivarium/internal/store"
@@ -40,7 +41,6 @@ type options struct {
 	noProxy       bool
 	daemon        bool
 	stop          bool
-	idleLock      time.Duration
 	showVersion   bool
 }
 
@@ -55,8 +55,6 @@ func main() {
 	flag.BoolVar(&opts.noProxy, "no-proxy", false, "disable the host bridge proxy")
 	flag.BoolVar(&opts.daemon, "daemon", false, "run the backend in the foreground without the TUI")
 	flag.BoolVar(&opts.stop, "stop", false, "stop a running backend daemon and exit")
-	flag.DurationVar(&opts.idleLock, "idle-lock", 15*time.Minute,
-		"lock the vault after this much inactivity (0 disables)")
 	flag.BoolVar(&opts.showVersion, "version", false, "print the version and exit")
 	flag.Parse()
 
@@ -171,7 +169,6 @@ func spawnDaemon(env paths.Env, opts options) (*exec.Cmd, error) {
 		args = append(args, "--proxy-port", strconv.Itoa(opts.proxyPort))
 		args = append(args, "--proxy-http-port", strconv.Itoa(opts.proxyHTTPPort))
 	}
-	args = append(args, "--idle-lock", opts.idleLock.String())
 
 	logPath := env.DaemonLogPath()
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
@@ -232,9 +229,7 @@ func buildDaemon(ctx context.Context, env paths.Env, opts options, st *store.Sto
 	srv := api.NewServer(st, am, dc, env)
 	srv.SetRegistry(registry)
 	bridge := buildBridge(ctx, env, opts, st, dc, am, registry, srv)
-	if opts.idleLock > 0 {
-		go am.AutoLock(ctx, opts.idleLock)
-	}
+	auditSecrets(st, am)
 	return daemon.New(daemon.Options{
 		SocketPath: socket,
 		LockPath:   filepath.Join(env.DataDir(), "daemon.lock"),
@@ -242,6 +237,26 @@ func buildDaemon(ctx context.Context, env paths.Env, opts options, st *store.Sto
 		Server:     srv,
 		Bridge:     bridge,
 	})
+}
+
+// auditSecrets logs API keys whose secret is absent from the store, so a lost
+// credential is surfaced at startup instead of failing later. A locked vault is
+// not an error here.
+func auditSecrets(st *store.Store, am *auth.Manager) {
+	keys, err := st.ListAPIKeys()
+	if err != nil {
+		return
+	}
+	var missing []string
+	for _, k := range keys {
+		if _, err := am.Secret(k.ID); errors.Is(err, keyring.ErrNotFound) {
+			missing = append(missing, k.Name)
+		}
+	}
+	if len(missing) > 0 {
+		log.Printf("vivarium: %d API key(s) have no stored secret: %s",
+			len(missing), strings.Join(missing, ", "))
+	}
 }
 
 // waitReady polls the API until it responds or the daemon fails to start.
