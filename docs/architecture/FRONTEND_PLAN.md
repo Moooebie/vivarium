@@ -164,7 +164,9 @@ No IPC changes were required; the TUI talks only to the unchanged API.
   (`409`) by the daemon and guarded in the TUI, because Docker's API returns
   `101 UPGRADED` and hangs for stopped containers. Each connect opens an
   independent exec shell (`GET /instances/{id}/connect`), so multiple terminals
-  do not mirror one another; resizes target the session's exec ID.
+  do not mirror one another; resizes target the session's exec ID. The initial
+  size is applied after the exec starts (and re-applied by the client on
+  connect and `SIGWINCH`), so the session fills the terminal immediately.
 - **Secrets visible.** The API-key form shows the secret in plaintext and
   prefills it when editing; the separate reveal toggle was removed. Name
   placeholders read `Input a name…` and names are required.

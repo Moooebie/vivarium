@@ -127,7 +127,9 @@ sub-editors, and base-image status/size. See `FRONTEND_PLAN.md`.
   (`/containers/{id}/exec` + `/exec/{id}/start` upgrade), so every client gets
   an independent shell. Container attach (PID 1 stdio) would mirror sessions.
   The exec ID is returned in the `X-Vivarium-Exec` header for per-session
-  resizes. The shell is `bash -l` when present, else `sh`.
+  resizes. The shell is `bash -l` when present, else `sh`. The PTY is resized
+  **after** the exec starts (Docker rejects resize on a session that has not
+  started), and the TUI re-applies its size once on connect and on `SIGWINCH`.
 - **Detached backend.** The TUI connects to an existing daemon or spawns one
   with `setsid` (logging to `$XDG_STATE_HOME/vivarium/daemon.log`) so it
   outlives the TUI and can be shared by multiple terminals. The daemon writes a

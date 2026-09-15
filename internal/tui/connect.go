@@ -47,6 +47,10 @@ func (c *connectCmd) Run() error {
 	}
 	defer stream.Close()
 
+	// Apply the size explicitly: the exec must be running before it can be
+	// resized, so the query-param resize during Connect may have been dropped.
+	c.resizeExec(fd, execID)
+
 	// The container shell needs per-keystroke input, not line-buffered cooked
 	// mode, so put the local terminal into raw mode for the session.
 	if term.IsTerminal(fd) {

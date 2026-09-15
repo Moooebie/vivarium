@@ -252,6 +252,7 @@ func TestStartGuestBridge(t *testing.T) {
 func TestConnect(t *testing.T) {
 	var gotCmd []string
 	var resizeQuery string
+	var order []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/containers/cid/exec"):
@@ -265,9 +266,11 @@ func TestConnect(t *testing.T) {
 			}
 			io.WriteString(w, `{"Id":"e1"}`)
 		case strings.HasSuffix(r.URL.Path, "/exec/e1/resize"):
+			order = append(order, "resize")
 			resizeQuery = r.URL.RawQuery
 			w.WriteHeader(http.StatusNoContent)
 		case strings.HasSuffix(r.URL.Path, "/exec/e1/start"):
+			order = append(order, "start")
 			hj, ok := w.(http.Hijacker)
 			if !ok {
 				t.Error("no hijacker")
@@ -303,6 +306,10 @@ func TestConnect(t *testing.T) {
 	}
 	if resizeQuery != "h=40&w=120" {
 		t.Fatalf("resize query = %q", resizeQuery)
+	}
+	// The resize must be sent after the exec starts; Docker rejects it before.
+	if len(order) != 2 || order[0] != "start" || order[1] != "resize" {
+		t.Fatalf("request order = %v, want [start resize]", order)
 	}
 }
 

@@ -128,3 +128,45 @@ func readMatch(t *testing.T, r io.Reader, re *regexp.Regexp) string {
 		return ""
 	}
 }
+
+// TestIntegrationConnectInitialSize verifies the guest PTY is sized to the
+// requested dimensions at session start (resize must happen after start).
+func TestIntegrationConnectInitialSize(t *testing.T) {
+	if os.Getenv("VIVARIUM_INTEGRATION") == "" {
+		t.Skip("set VIVARIUM_INTEGRATION=1 to run Docker integration tests")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	c := NewController(DefaultSocket)
+	if err := c.Ping(ctx); err != nil {
+		t.Skipf("docker daemon unavailable: %v", err)
+	}
+	if _, err := c.EnsureNetwork(ctx); err != nil {
+		t.Fatalf("ensure network: %v", err)
+	}
+
+	name := "vivarium-it-size-" + strings.ReplaceAll(time.Now().Format("150405.000000"), ".", "")
+	id, err := c.CreateAndStart(ctx, ContainerSpec{
+		Name:  name,
+		Image: "ubuntu:24.04",
+		Cmd:   []string{"sleep", "60"},
+	})
+	if err != nil {
+		t.Fatalf("create and start: %v", err)
+	}
+	defer func() { _ = c.Remove(ctx, id) }()
+
+	stream, _, err := c.Connect(ctx, id, 100, 30, nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer stream.Close()
+	if _, err := io.WriteString(stream, "echo SIZE_$(stty size)\n"); err != nil {
+		t.Fatalf("write to session: %v", err)
+	}
+	sizeRe := regexp.MustCompile(`SIZE_([0-9]+ [0-9]+)`)
+	if got := strings.TrimSpace(readMatch(t, stream, sizeRe)); got != "30 100" {
+		t.Fatalf("stty size = %q, want %q", got, "30 100")
+	}
+}

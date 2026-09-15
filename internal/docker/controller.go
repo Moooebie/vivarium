@@ -230,13 +230,15 @@ func (c *Controller) Connect(ctx context.Context, id string, cols, rows int, env
 	if err != nil {
 		return nil, "", err
 	}
-	if cols > 0 && rows > 0 {
-		// Best effort: the session still works if the initial resize fails.
-		_ = c.client.ResizeExec(ctx, execID, rows, cols)
-	}
 	stream, err := c.client.StartExec(ctx, execID, true)
 	if err != nil {
 		return nil, "", err
+	}
+	// Resize only after the exec is running: Docker rejects /exec/{id}/resize
+	// on a session that has not started, which previously left the PTY at its
+	// default size. Best effort: the session still works if this fails.
+	if cols > 0 && rows > 0 {
+		_ = c.client.ResizeExec(ctx, execID, rows, cols)
 	}
 	return stream, execID, nil
 }
