@@ -2,11 +2,12 @@ package docker
 
 // ContainerSummary is an entry from GET /containers/json.
 type ContainerSummary struct {
-	ID     string   `json:"Id"`
-	Names  []string `json:"Names"`
-	Image  string   `json:"Image"`
-	State  string   `json:"State"`
-	Status string   `json:"Status"`
+	ID     string            `json:"Id"`
+	Names  []string          `json:"Names"`
+	Image  string            `json:"Image"`
+	State  string            `json:"State"`
+	Status string            `json:"Status"`
+	Labels map[string]string `json:"Labels"`
 }
 
 // ContainerInspect is the response from GET /containers/{id}/json.
@@ -45,11 +46,12 @@ type ContainerState struct {
 
 // ContainerConfig is the immutable creation config.
 type ContainerConfig struct {
-	Image      string   `json:"Image"`
-	Env        []string `json:"Env"`
-	Cmd        []string `json:"Cmd"`
-	User       string   `json:"User"`
-	WorkingDir string   `json:"WorkingDir"`
+	Image      string            `json:"Image"`
+	Env        []string          `json:"Env"`
+	Cmd        []string          `json:"Cmd"`
+	User       string            `json:"User"`
+	WorkingDir string            `json:"WorkingDir"`
+	Labels     map[string]string `json:"Labels"`
 }
 
 // NetworkSettings describes attached networks.
@@ -101,14 +103,15 @@ type ipamIPAMEntry struct {
 }
 
 type containerCreateRequest struct {
-	Image      string      `json:"Image"`
-	Cmd        []string    `json:"Cmd,omitempty"`
-	Env        []string    `json:"Env,omitempty"`
-	User       string      `json:"User,omitempty"`
-	WorkingDir string      `json:"WorkingDir,omitempty"`
-	Tty        bool        `json:"Tty"`
-	OpenStdin  bool        `json:"OpenStdin"`
-	HostConfig *hostConfig `json:"HostConfig"`
+	Image      string            `json:"Image"`
+	Cmd        []string          `json:"Cmd,omitempty"`
+	Env        []string          `json:"Env,omitempty"`
+	User       string            `json:"User,omitempty"`
+	WorkingDir string            `json:"WorkingDir,omitempty"`
+	Labels     map[string]string `json:"Labels,omitempty"`
+	Tty        bool              `json:"Tty"`
+	OpenStdin  bool              `json:"OpenStdin"`
+	HostConfig *hostConfig       `json:"HostConfig"`
 }
 
 type hostConfig struct {

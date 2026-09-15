@@ -41,6 +41,15 @@ func IsNotFound(err error) bool {
 	return false
 }
 
+// IsConflict reports whether the error is an HTTP 409 from the daemon.
+func IsConflict(err error) bool {
+	var apiErr *APIError
+	if ok := asAPIError(err, &apiErr); ok {
+		return apiErr.StatusCode == http.StatusConflict
+	}
+	return false
+}
+
 func asAPIError(err error, target **APIError) bool {
 	for err != nil {
 		if e, ok := err.(*APIError); ok {

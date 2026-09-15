@@ -230,6 +230,7 @@ func buildDaemon(ctx context.Context, env paths.Env, opts options, st *store.Sto
 	srv.SetRegistry(registry)
 	bridge := buildBridge(ctx, env, opts, st, dc, am, registry, srv)
 	auditSecrets(st, am)
+	reconcileContainers(ctx, srv)
 	return daemon.New(daemon.Options{
 		SocketPath: socket,
 		LockPath:   filepath.Join(env.DataDir(), "daemon.lock"),
@@ -256,6 +257,21 @@ func auditSecrets(st *store.Store, am *auth.Manager) {
 	if len(missing) > 0 {
 		log.Printf("vivarium: %d API key(s) have no stored secret: %s",
 			len(missing), strings.Join(missing, ", "))
+	}
+}
+
+// reconcileContainers removes managed containers no longer referenced by any
+// instance (orphans left by cleared metadata or failed creations). Best effort.
+func reconcileContainers(ctx context.Context, srv *api.Server) {
+	recCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	n, err := srv.ReconcileContainers(recCtx)
+	if err != nil {
+		log.Printf("vivarium: container reconcile: %v", err)
+		return
+	}
+	if n > 0 {
+		log.Printf("vivarium: removed %d orphaned container(s)", n)
 	}
 }
 

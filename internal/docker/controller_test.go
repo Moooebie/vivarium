@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -389,5 +390,30 @@ func TestSanitizeContainerName(t *testing.T) {
 		if got := SanitizeContainerName(in); got != want {
 			t.Fatalf("SanitizeContainerName(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestErrorClassification(t *testing.T) {
+	conflict := &APIError{StatusCode: http.StatusConflict, Message: "in use"}
+	if !IsConflict(conflict) || IsNotFound(conflict) {
+		t.Fatal("conflict misclassified")
+	}
+	notFound := &APIError{StatusCode: http.StatusNotFound}
+	if !IsNotFound(notFound) || IsConflict(notFound) {
+		t.Fatal("not-found misclassified")
+	}
+	if IsConflict(errors.New("boom")) || IsNotFound(errors.New("boom")) {
+		t.Fatal("plain error misclassified")
+	}
+}
+
+func TestBuildCreateRequestLabels(t *testing.T) {
+	c := NewControllerWithClient(NewClient(""), "")
+	req := c.buildCreateRequest(ContainerSpec{
+		Image:  "img",
+		Labels: map[string]string{"vivarium.managed": "true", "vivarium.instance_id": "i1"},
+	})
+	if req.Labels["vivarium.managed"] != "true" || req.Labels["vivarium.instance_id"] != "i1" {
+		t.Fatalf("labels = %+v", req.Labels)
 	}
 }

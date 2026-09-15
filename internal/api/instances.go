@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -136,6 +137,7 @@ func (s *Server) handleCreateInstance(w http.ResponseWriter, r *http.Request) {
 	if user == "" {
 		user = "root"
 	}
+	instID := models.NewID()
 	spec := docker.ContainerSpec{
 		Name:        docker.SanitizeContainerName(name),
 		Image:       imageTag,
@@ -148,9 +150,20 @@ func (s *Server) handleCreateInstance(w http.ResponseWriter, r *http.Request) {
 		Resources:   recipe.Resources,
 		CACert:      s.proxy.CACertPEM,
 		GuestBridge: bridge,
+		Labels: map[string]string{
+			"vivarium.managed":     "true",
+			"vivarium.instance_id": instID,
+		},
 	}
 	containerID, err := s.docker.CreateAndStart(ctx, spec)
+	if err != nil && docker.IsConflict(err) {
+		containerID, err = s.resolveNameConflict(ctx, spec)
+	}
 	if err != nil {
+		if docker.IsConflict(err) || errors.Is(err, errNameConflict) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
 		writeError(w, http.StatusBadGateway, "create container: "+err.Error())
 		return
 	}
@@ -158,7 +171,7 @@ func (s *Server) handleCreateInstance(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().Unix()
 	inst := models.Instance{
-		ID:           models.NewID(),
+		ID:           instID,
 		ContainerID:  containerID,
 		Name:         name,
 		RecipeID:     req.RecipeID,
@@ -175,11 +188,112 @@ func (s *Server) handleCreateInstance(w http.ResponseWriter, r *http.Request) {
 		User:         user,
 	}
 	if err := s.store.PutInstance(inst); err != nil {
+		_ = s.docker.Remove(ctx, containerID)
 		writeMappedError(w, err)
 		return
 	}
 	s.register(inst)
 	writeJSON(w, http.StatusCreated, instanceView{Instance: inst})
+}
+
+// errNameConflict marks a container-name conflict that cannot be healed
+// automatically (the name belongs to another tracked instance or to a
+// non-Vivarium container).
+var errNameConflict = errors.New("container name conflict")
+
+// resolveNameConflict handles a Docker 409 when creating a container whose name
+// is already taken. If the existing container is a Vivarium container not
+// referenced by any instance (an orphan, e.g. left over from cleared metadata),
+// it is removed and creation is retried once. Conflicts with tracked instances
+// or foreign containers are returned wrapped in errNameConflict.
+func (s *Server) resolveNameConflict(ctx context.Context, spec docker.ContainerSpec) (string, error) {
+	existing, err := s.docker.Client().InspectContainer(ctx, spec.Name, false)
+	if err != nil {
+		if docker.IsNotFound(err) {
+			// The name became free; retry.
+			return s.docker.CreateAndStart(ctx, spec)
+		}
+		return "", err
+	}
+	if s.containerTracked(existing.ID) {
+		return "", fmt.Errorf("%w: another instance already uses the name %q", errNameConflict, spec.Name)
+	}
+	if !s.isVivariumContainer(existing) {
+		return "", fmt.Errorf("%w: a non-Vivarium container named %q already exists", errNameConflict, spec.Name)
+	}
+	if err := s.docker.Remove(ctx, existing.ID); err != nil {
+		return "", fmt.Errorf("remove stale container %q: %w", spec.Name, err)
+	}
+	return s.docker.CreateAndStart(ctx, spec)
+}
+
+// containerTracked reports whether any persisted instance references the
+// container ID.
+func (s *Server) containerTracked(containerID string) bool {
+	if containerID == "" {
+		return false
+	}
+	instances, err := s.store.ListInstances()
+	if err != nil {
+		return false
+	}
+	for _, in := range instances {
+		if in.ContainerID == containerID {
+			return true
+		}
+	}
+	return false
+}
+
+// isVivariumContainer reports whether an inspected container was created by
+// Vivarium, either via the managed label or membership of vivarium-net.
+func (s *Server) isVivariumContainer(inspect *docker.ContainerInspect) bool {
+	if inspect == nil {
+		return false
+	}
+	if inspect.Config != nil && inspect.Config.Labels["vivarium.managed"] == "true" {
+		return true
+	}
+	if inspect.NetworkSettings != nil {
+		if _, ok := inspect.NetworkSettings.Networks[docker.NetworkName]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// ReconcileContainers removes Vivarium-managed containers that are no longer
+// referenced by any instance (orphans from cleared metadata or failed
+// creations). It is best-effort and returns the number removed.
+func (s *Server) ReconcileContainers(ctx context.Context) (int, error) {
+	instances, err := s.store.ListInstances()
+	if err != nil {
+		return 0, err
+	}
+	tracked := make(map[string]struct{}, len(instances))
+	for _, in := range instances {
+		if in.ContainerID != "" {
+			tracked[in.ContainerID] = struct{}{}
+		}
+	}
+	summaries, err := s.docker.Client().ListContainers(ctx, true)
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for _, c := range summaries {
+		if c.Labels["vivarium.managed"] != "true" {
+			continue
+		}
+		if _, ok := tracked[c.ID]; ok {
+			continue
+		}
+		if err := s.docker.Remove(ctx, c.ID); err != nil && !docker.IsNotFound(err) {
+			continue
+		}
+		removed++
+	}
+	return removed, nil
 }
 
 // handleUpdateInstance renames an instance and/or rebinds its API endpoints.
@@ -363,8 +477,21 @@ func (s *Server) handleDeleteInstance(w http.ResponseWriter, r *http.Request) {
 		writeMappedError(w, err)
 		return
 	}
+	removed := false
 	if inst.ContainerID != "" {
-		if err := s.docker.Remove(r.Context(), inst.ContainerID); err != nil && !docker.IsNotFound(err) {
+		if err := s.docker.Remove(r.Context(), inst.ContainerID); err != nil {
+			if !docker.IsNotFound(err) {
+				writeError(w, http.StatusBadGateway, "remove container: "+err.Error())
+				return
+			}
+		} else {
+			removed = true
+		}
+	}
+	if !removed {
+		// Fall back to the derived name when the stored ID is stale or empty.
+		name := docker.SanitizeContainerName(inst.Name)
+		if err := s.docker.Remove(r.Context(), name); err != nil && !docker.IsNotFound(err) {
 			writeError(w, http.StatusBadGateway, "remove container: "+err.Error())
 			return
 		}

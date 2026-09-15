@@ -116,6 +116,13 @@ sub-editors, and base-image status/size. See `FRONTEND_PLAN.md`.
     mount) binding without recreating the container (for example a `mount --bind`
     inside the container's mount namespace and a device-cgroup allowance).
     Discouraged and not implemented.
+- **Container identity + orphan recovery.** Containers carry
+  `vivarium.managed=true` and `vivarium.instance_id` labels. At startup the
+  daemon removes labeled containers that no instance references. A create that
+  hits a Docker name conflict removes the untracked Vivarium orphan and retries
+  once; a conflict with a tracked instance or a foreign container returns `409`.
+  Instance deletion falls back to the derived container name when the stored ID
+  is stale. This keeps display-name reuse working after metadata is cleared.
 - **Connect = exec, not attach.** Interactive shells use Docker's exec API
   (`/containers/{id}/exec` + `/exec/{id}/start` upgrade), so every client gets
   an independent shell. Container attach (PID 1 stdio) would mirror sessions.

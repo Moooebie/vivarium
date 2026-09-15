@@ -819,3 +819,157 @@ func TestSystemStatus(t *testing.T) {
 		t.Fatalf("docker should be reachable: %s", body)
 	}
 }
+
+// conflictDocker is a stub whose /containers/create returns 409 until the
+// colliding container is removed, for exercising name-conflict recovery.
+func conflictDocker(t *testing.T, inspectJSON string, removed *bool) *httptest.Server {
+	t.Helper()
+	var creates int
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(p, "/networks/vivarium-net"):
+			w.WriteHeader(http.StatusNotFound)
+			io.WriteString(w, `{"message":"not found"}`)
+		case r.Method == http.MethodPost && strings.HasSuffix(p, "/networks/create"):
+			io.WriteString(w, `{"Id":"net1"}`)
+		case r.Method == http.MethodPost && strings.HasSuffix(p, "/containers/create"):
+			creates++
+			if creates == 1 {
+				w.WriteHeader(http.StatusConflict)
+				io.WriteString(w, `{"message":"Conflict. The container name \"/dev\" is already in use"}`)
+				return
+			}
+			io.WriteString(w, `{"Id":"cid1"}`)
+		case r.Method == http.MethodGet && strings.HasSuffix(p, "/containers/dev/json"):
+			io.WriteString(w, inspectJSON)
+		case r.Method == http.MethodGet && strings.HasSuffix(p, "/containers/cid1/json"):
+			io.WriteString(w, `{"Id":"cid1","State":{"Status":"running","Running":true},"NetworkSettings":{"Networks":{"vivarium-net":{"IPAddress":"172.28.0.2"}}}}`)
+		case r.Method == http.MethodDelete && strings.HasSuffix(p, "/containers/orphan1"):
+			if removed != nil {
+				*removed = true
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && strings.HasSuffix(p, "/containers/cid1/start"):
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected docker request: %s %s", r.Method, p)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	return httptest.NewServer(handler)
+}
+
+func TestCreateInstanceHealsNameConflict(t *testing.T) {
+	removed := false
+	orphan := `{"Id":"orphan1","State":{"Status":"exited","Running":false},"NetworkSettings":{"Networks":{"vivarium-net":{"IPAddress":"172.28.0.9"}}}}`
+	env := newTestEnvWithDocker(t, conflictDocker(t, orphan, &removed))
+
+	resp, body := env.do(t, http.MethodPost, "/api/v1/instances",
+		instanceCreateRequest{Name: "dev", BaseImageTag: "img"})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create = %d %s", resp.StatusCode, body)
+	}
+	if !removed {
+		t.Fatal("expected the orphaned container to be removed")
+	}
+}
+
+func TestCreateInstanceConflictTracked(t *testing.T) {
+	removed := false
+	orphan := `{"Id":"orphan1","State":{"Status":"exited","Running":false},"NetworkSettings":{"Networks":{"vivarium-net":{"IPAddress":"172.28.0.9"}}}}`
+	env := newTestEnvWithDocker(t, conflictDocker(t, orphan, &removed))
+	if err := env.store.PutInstance(models.Instance{
+		ID: "i0", ContainerID: "orphan1", Name: "old", Status: models.StatusHalted, BaseImageTag: "img",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, body := env.do(t, http.MethodPost, "/api/v1/instances",
+		instanceCreateRequest{Name: "dev", BaseImageTag: "img"})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("create = %d %s", resp.StatusCode, body)
+	}
+	if removed {
+		t.Fatal("a tracked container must not be removed")
+	}
+}
+
+func TestCreateInstanceConflictForeign(t *testing.T) {
+	removed := false
+	foreign := `{"Id":"orphan1","State":{"Status":"exited","Running":false},"NetworkSettings":{"Networks":{"bridge":{"IPAddress":"172.17.0.9"}}}}`
+	env := newTestEnvWithDocker(t, conflictDocker(t, foreign, &removed))
+
+	resp, _ := env.do(t, http.MethodPost, "/api/v1/instances",
+		instanceCreateRequest{Name: "dev", BaseImageTag: "img"})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("create = %d", resp.StatusCode)
+	}
+	if removed {
+		t.Fatal("a non-Vivarium container must not be removed")
+	}
+}
+
+func TestDeleteInstanceFallsBackToName(t *testing.T) {
+	removed := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete && strings.HasSuffix(r.URL.Path, "/containers/dev") {
+			removed = true
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		t.Errorf("unexpected docker request: %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	env := newTestEnvWithDocker(t, srv)
+	if err := env.store.PutInstance(models.Instance{
+		ID: "i1", Name: "dev", Status: models.StatusHalted, BaseImageTag: "img",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, body := env.do(t, http.MethodDelete, "/api/v1/instances/i1", nil)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete = %d %s", resp.StatusCode, body)
+	}
+	if !removed {
+		t.Fatal("expected removal by derived name")
+	}
+}
+
+func TestReconcileContainersRemovesOrphans(t *testing.T) {
+	var removed []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/containers/json"):
+			io.WriteString(w, `[
+				{"Id":"cid1","Labels":{"vivarium.managed":"true"}},
+				{"Id":"cid2","Labels":{"vivarium.managed":"true"}},
+				{"Id":"cid3","Labels":{}}
+			]`)
+		case r.Method == http.MethodDelete:
+			removed = append(removed, strings.TrimPrefix(r.URL.Path, "/v1.44/containers/"))
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected docker request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	env := newTestEnvWithDocker(t, srv)
+	if err := env.store.PutInstance(models.Instance{
+		ID: "i1", ContainerID: "cid1", Name: "dev", Status: models.StatusRunning, BaseImageTag: "img",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := env.server.ReconcileContainers(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("removed = %d, want 1", n)
+	}
+	if len(removed) != 1 || removed[0] != "cid2" {
+		t.Fatalf("removed = %v, want [cid2]", removed)
+	}
+}

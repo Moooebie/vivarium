@@ -61,6 +61,9 @@ type ContainerSpec struct {
 	Files map[string]InjectedFile
 	// GuestBridge, when set, is injected and started after the container.
 	GuestBridge *GuestBridgeSpec
+	// Labels are attached to the container (used to identify Vivarium-managed
+	// containers for reconciliation).
+	Labels map[string]string
 }
 
 // CA certificate destination paths inside the guest.
@@ -338,6 +341,7 @@ func (c *Controller) buildCreateRequest(spec ContainerSpec) containerCreateReque
 		Env:        envSlice(spec.Env),
 		User:       spec.User,
 		WorkingDir: spec.WorkingDir,
+		Labels:     spec.Labels,
 		Tty:        true,
 		OpenStdin:  true,
 		HostConfig: hc,
