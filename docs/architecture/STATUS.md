@@ -89,12 +89,14 @@ sub-editors, and base-image status/size. See `FRONTEND_PLAN.md`.
   root-started TCP relay (`127.0.0.1:443`/`:80` → gateway) so agents use their
   **default** base URLs, and mock hosts are written into a managed `/etc/hosts`
   block at runtime (`SyncHosts`). No host root and no `iptables`. See `PROXY.md`.
-- **Live endpoints (no recreate).** Changing an instance's API endpoints only
-  updates the host proxy registry, the guest `/etc/hosts`, and the provider env
-  of new exec sessions — the container is never recreated. Provider dummy tokens
-  are injected per exec (`Connect`) instead of being stored in the container
-  environment. `/etc/hosts` is re-synced after create and after every start
-  (Docker regenerates it on start).
+- **Live endpoints and environment (no recreate).** Changing an instance's API
+  endpoints or user environment is applied to new exec sessions; endpoints also
+  update the host proxy registry and the guest `/etc/hosts`. The container is
+  never recreated. Provider dummy tokens and user env are injected per exec
+  (`Connect`) instead of being baked into the container environment; only CA
+  trust vars are added to the container env at create. `Instance.EnvVars` holds
+  the user variables only. `/etc/hosts` is re-synced after create and after
+  every start (Docker regenerates it on start).
 - **No base-URL injection.** Vivarium injects only the dummy provider API-key
   variable for standard providers; agents use their built-in defaults. Custom
   endpoints are configured by the user (Vivarium only makes `mock_url` reachable
@@ -110,12 +112,14 @@ sub-editors, and base-image status/size. See `FRONTEND_PLAN.md`.
   to a running container, and cannot mutate `Config.Env`/`HostConfig`; recreating
   would discard the writable layer. The instance editor disables these actions
   (grayed out) and instance creation warns when GPUs are bound; use a new
-  instance to change them. Endpoints are exempt because their effects
+  instance to change them. Endpoints and env are exempt because their effects
   (proxy route, `/etc/hosts`, exec env) are reproducible at runtime.
   - **TODO (future):** a privileged host-side helper could change device (and
     mount) binding without recreating the container (for example a `mount --bind`
     inside the container's mount namespace and a device-cgroup allowance).
-    Discouraged and not implemented.
+    Discouraged and not implemented. The only supported alternatives today are
+    recreating the container (wipes the writable layer) or `docker commit` +
+    recreate.
 - **Container identity + orphan recovery.** Containers carry
   `vivarium.managed=true` and `vivarium.instance_id` labels. At startup the
   daemon removes labeled containers that no instance references. A create that

@@ -60,12 +60,13 @@ type InstanceCreateRequest struct {
 	GPUs         []models.GPU   `json:"gpus"`
 }
 
-// InstanceUpdateRequest is the body of PUT /instances/{id}. Only the name and
-// the bound API endpoints can change after creation; mounts and GPUs are fixed
-// at create time.
+// InstanceUpdateRequest is the body of PUT /instances/{id}. Only the name, the
+// bound API endpoints, and the environment can change after creation; mounts
+// and GPUs are fixed at create time.
 type InstanceUpdateRequest struct {
-	Name         string    `json:"name"`
-	EndpointKeys *[]string `json:"endpoint_keys"`
+	Name         string             `json:"name"`
+	EndpointKeys *[]string          `json:"endpoint_keys"`
+	EnvVars      *map[string]string `json:"env_vars"`
 }
 
 // InstanceView augments a persisted instance with live Docker data.

@@ -35,6 +35,7 @@ func newEditInstanceScreen(app *App, inst apitypes.InstanceView) *editInstanceSc
 	s := &editInstanceScreen{app: app, inst: inst}
 	s.form = newForm(app.theme)
 	s.form.addAction("endpoints", "API Endpoints")
+	s.form.addAction("env", "Environment Variables")
 	s.form.addDisabledAction("mounts", "Mount Points (fixed at creation)")
 	s.form.addDisabledAction("gpus", "GPUs (fixed at creation)")
 	s.form.addAction("info", "Connection Info")
@@ -55,6 +56,7 @@ func (s *editInstanceScreen) CapturingInput() bool { return s.form.Capturing() }
 
 func (s *editInstanceScreen) refreshLabels() {
 	s.form.setActionLabel("endpoints", "API Endpoints: "+itoa(len(s.inst.Endpoints)))
+	s.form.setActionLabel("env", "Environment Variables: "+itoa(len(s.inst.EnvVars)))
 }
 
 func (s *editInstanceScreen) Init() tea.Cmd { return nil }
@@ -124,6 +126,8 @@ func (s *editInstanceScreen) dispatch(action string) tea.Cmd {
 	switch action {
 	case "endpoints":
 		return s.openEndpoints()
+	case "env":
+		return s.editEnv()
 	case "info":
 		return push(newConnectionInfoScreen(s.app, s.inst))
 	case "toggle":
@@ -231,6 +235,19 @@ func (s *editInstanceScreen) toggle() tea.Cmd {
 func (s *editInstanceScreen) openEndpoints() tea.Cmd {
 	host := newInstanceEndpointsHost(s.inst)
 	return push(newEndpointsEditorScreen(s.app, host, s.loadEndpointKeys, s.commitEndpoints(host)))
+}
+
+// editEnv edits the instance's user environment. Changes apply to new exec
+// sessions (no container recreate).
+func (s *editInstanceScreen) editEnv() tea.Cmd {
+	id := s.inst.ID
+	return push(newEnvVarsEditorScreen(s.app, s.inst.EnvVars, func(env map[string]string) tea.Cmd {
+		return tea.Batch(setBusy(true, "Updating environment"), func() tea.Msg {
+			view, err := s.app.ctx.Client.UpdateInstance(context.Background(), id,
+				apitypes.InstanceUpdateRequest{EnvVars: &env})
+			return editDoneMsg{inst: view, status: "environment updated", err: err}
+		})
+	}))
 }
 
 func (s *editInstanceScreen) loadEndpointKeys() tea.Cmd {

@@ -190,6 +190,7 @@ func cloneRequest(v apitypes.InstanceView) apitypes.InstanceCreateRequest {
 		Recipe: &models.Recipe{
 			Name:          v.Name + " copy",
 			APIEndpoints:  eps,
+			EnvVars:       v.EnvVars,
 			Resources:     v.Resources,
 			DefaultMounts: v.Mounts,
 			GPUs:          v.GPUs,

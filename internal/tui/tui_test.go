@@ -440,3 +440,35 @@ func TestAPIKeySecretStateBadges(t *testing.T) {
 		t.Fatalf("legacy no-secret state = %q", got)
 	}
 }
+
+func TestInstanceEditorEnvAction(t *testing.T) {
+	app := &App{ctx: &Context{Client: &fakeAPI{}}, theme: DefaultTheme(), spinner: spinner.New()}
+	s := newEditInstanceScreen(app, apitypes.InstanceView{Instance: models.Instance{
+		ID: "i1", Name: "dev", Status: models.StatusRunning, BaseImageTag: "img",
+		EnvVars: map[string]string{"A": "1", "B": "2"},
+	}})
+	cmd := s.dispatch("env")
+	if cmd == nil {
+		t.Fatal("expected the env editor to be pushed")
+	}
+	if _, ok := cmd().(pushMsg); !ok {
+		t.Fatalf("expected pushMsg, got %T", cmd())
+	}
+	// Mounts/GPUs are fixed at creation and are no longer dispatchable.
+	if cmd := s.dispatch("mounts"); cmd != nil {
+		t.Fatal("mounts should not be editable")
+	}
+	if cmd := s.dispatch("gpus"); cmd != nil {
+		t.Fatal("gpus should not be editable")
+	}
+}
+
+func TestCloneRequestCarriesEnv(t *testing.T) {
+	v := apitypes.InstanceView{Instance: models.Instance{
+		Name: "dev", BaseImageTag: "img", EnvVars: map[string]string{"A": "1"},
+	}}
+	req := cloneRequest(v)
+	if req.Recipe == nil || req.Recipe.EnvVars["A"] != "1" {
+		t.Fatalf("clone env = %+v", req.Recipe)
+	}
+}

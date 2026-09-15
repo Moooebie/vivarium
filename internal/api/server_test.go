@@ -355,8 +355,8 @@ func TestInstanceRegistersEndpoints(t *testing.T) {
 	if _, ok := view.EnvVars["OPENAI_BASE_URL"]; ok {
 		t.Fatal("base URLs must not be injected")
 	}
-	if view.EnvVars["SSL_CERT_FILE"] == "" {
-		t.Fatal("expected CA trust env var")
+	if _, ok := view.EnvVars["SSL_CERT_FILE"]; ok {
+		t.Fatal("CA trust vars belong to the container env, not the instance user env")
 	}
 	if len(fr.registered) != 1 || fr.registered[0] != view.ID {
 		t.Fatalf("registry registrations = %v", fr.registered)
@@ -540,8 +540,8 @@ func TestInstanceBindsEndpointWithoutContainerKeyEnv(t *testing.T) {
 	if _, ok := view.EnvVars["OPENCODE_CONFIG"]; ok {
 		t.Fatal("opencode config must not be injected")
 	}
-	if view.EnvVars["SSL_CERT_FILE"] == "" {
-		t.Fatal("expected CA trust env var")
+	if _, ok := view.EnvVars["SSL_CERT_FILE"]; ok {
+		t.Fatal("CA trust vars belong to the container env, not the instance user env")
 	}
 	if len(view.Endpoints) != 1 || view.Endpoints[0].KeyID != "k1" || view.Endpoints[0].Token == "" {
 		t.Fatalf("expected a bound endpoint with a dummy token, got %+v", view.Endpoints)
@@ -971,5 +971,133 @@ func TestReconcileContainersRemovesOrphans(t *testing.T) {
 	}
 	if len(removed) != 1 || removed[0] != "cid2" {
 		t.Fatalf("removed = %v, want [cid2]", removed)
+	}
+}
+
+func TestSanitizeUserEnv(t *testing.T) {
+	out := sanitizeUserEnv(map[string]string{
+		"FOO": "bar", "DEEPSEEK_API_KEY": "x", "OPENAI_API_KEY": "y", "CUSTOM_API_KEY": "z",
+	})
+	if out["FOO"] != "bar" {
+		t.Fatalf("FOO = %q", out["FOO"])
+	}
+	if _, ok := out["DEEPSEEK_API_KEY"]; ok {
+		t.Fatal("managed provider var must be stripped")
+	}
+	if _, ok := out["OPENAI_API_KEY"]; ok {
+		t.Fatal("managed provider var must be stripped")
+	}
+	if out["CUSTOM_API_KEY"] != "z" {
+		t.Fatal("custom keys are user-managed and must be kept")
+	}
+}
+
+func TestExecEnvMerges(t *testing.T) {
+	out := execEnv(map[string]string{"FOO": "bar"}, []models.InstanceEndpoint{
+		{ProviderType: models.ProviderDeepSeek, Token: "tok"},
+		{ProviderType: models.ProviderCustom, Token: "custom"},
+	})
+	if out["FOO"] != "bar" || out["DEEPSEEK_API_KEY"] != "tok" {
+		t.Fatalf("env = %+v", out)
+	}
+	if _, ok := out["CUSTOM_API_KEY"]; ok {
+		t.Fatal("custom providers must not get an injected key var")
+	}
+}
+
+func TestUpdateInstanceEnvVarsLive(t *testing.T) {
+	env := newTestEnv(t)
+	recipe := models.Recipe{Name: "r", EnvVars: map[string]string{
+		"FOO": "bar", "DEEPSEEK_API_KEY": "placeholder",
+	}}
+	resp, body := env.do(t, http.MethodPost, "/api/v1/instances",
+		instanceCreateRequest{Name: "dev", BaseImageTag: "img", Recipe: &recipe})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create = %d %s", resp.StatusCode, body)
+	}
+	var view instanceView
+	json.Unmarshal(body, &view)
+	if view.EnvVars["FOO"] != "bar" {
+		t.Fatalf("env = %+v", view.EnvVars)
+	}
+	if _, ok := view.EnvVars["DEEPSEEK_API_KEY"]; ok {
+		t.Fatal("managed provider var must not be persisted")
+	}
+
+	next := map[string]string{"BAZ": "qux"}
+	resp, body = env.do(t, http.MethodPut, "/api/v1/instances/"+view.ID,
+		instanceUpdateRequest{EnvVars: &next})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("update = %d %s", resp.StatusCode, body)
+	}
+	var updated instanceView
+	json.Unmarshal(body, &updated)
+	if len(updated.EnvVars) != 1 || updated.EnvVars["BAZ"] != "qux" {
+		t.Fatalf("env = %+v", updated.EnvVars)
+	}
+	if updated.ContainerID != view.ContainerID {
+		t.Fatalf("env update must not recreate the container")
+	}
+}
+
+func TestConnectInjectsMergedEnv(t *testing.T) {
+	var gotEnv []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/containers/cid1/json"):
+			io.WriteString(w, `{"Id":"cid1","State":{"Status":"running","Running":true}}`)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/containers/cid1/exec"):
+			var req struct {
+				Env []string `json:"Env"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Errorf("decode exec: %v", err)
+			}
+			gotEnv = req.Env
+			io.WriteString(w, `{"Id":"e1"}`)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/exec/e1/resize"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/exec/e1/start"):
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				t.Error("no hijacker")
+				return
+			}
+			conn, buf, err := hj.Hijack()
+			if err != nil {
+				t.Errorf("hijack: %v", err)
+				return
+			}
+			defer conn.Close()
+			buf.WriteString("HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n")
+			buf.Flush()
+			io.Copy(conn, conn)
+		default:
+			t.Errorf("unexpected docker request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	env := newTestEnvWithDocker(t, srv)
+	if err := env.store.PutInstance(models.Instance{
+		ID: "i1", ContainerID: "cid1", Name: "dev", Status: models.StatusRunning, BaseImageTag: "img",
+		EnvVars: map[string]string{"FOO": "bar"},
+		Endpoints: []models.InstanceEndpoint{{
+			KeyID: "k1", ProviderType: models.ProviderDeepSeek,
+			BaseURL: "https://api.deepseek.com/v1", MockURL: "https://api.deepseek.com/v1", Token: "tok-ds",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cli := client.NewWithHTTP(env.ts.URL, env.ts.Client())
+	stream, _, err := cli.Connect(context.Background(), "i1", 100, 30)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	stream.Close()
+
+	joined := strings.Join(gotEnv, ",")
+	if !strings.Contains(joined, "FOO=bar") || !strings.Contains(joined, "DEEPSEEK_API_KEY=tok-ds") {
+		t.Fatalf("exec env = %v", gotEnv)
 	}
 }

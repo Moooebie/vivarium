@@ -112,9 +112,9 @@ func (s *Server) handleCreateInstance(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Provider dummy tokens are injected per exec session (see Connect), so the
-	// container environment holds only user-provided variables plus CA trust
-	// settings. This lets endpoints change without recreating the container.
-	env := buildInstanceEnv(recipe.EnvVars, s.proxy.CACertPEM)
+	// persisted env holds only user-provided variables; CA trust settings are
+	// added to the container env. This lets env and endpoints change live.
+	userEnv := sanitizeUserEnv(recipe.EnvVars)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 	defer cancel()
@@ -142,7 +142,7 @@ func (s *Server) handleCreateInstance(w http.ResponseWriter, r *http.Request) {
 		Name:        docker.SanitizeContainerName(name),
 		Image:       imageTag,
 		User:        user,
-		Env:         env,
+		Env:         containerEnv(userEnv, s.proxy.CACertPEM),
 		Mounts:      mounts,
 		GPUs:        gpus,
 		MockHosts:   mockHosts(endpoints),
@@ -182,7 +182,7 @@ func (s *Server) handleCreateInstance(w http.ResponseWriter, r *http.Request) {
 		Mounts:       mounts,
 		GPUs:         gpus,
 		IPAddress:    ip,
-		EnvVars:      env,
+		EnvVars:      userEnv,
 		Endpoints:    endpoints,
 		Resources:    recipe.Resources,
 		User:         user,
@@ -296,10 +296,10 @@ func (s *Server) ReconcileContainers(ctx context.Context) (int, error) {
 	return removed, nil
 }
 
-// handleUpdateInstance renames an instance and/or rebinds its API endpoints.
-// Endpoint changes are applied live: the proxy registry is updated and the
-// container's /etc/hosts is resynced, so the container is never recreated.
-// Mounts and GPUs are fixed at create time.
+// handleUpdateInstance renames an instance and/or rebinds its API endpoints or
+// environment. These changes are applied live (registry + /etc/hosts + per-exec
+// env), so the container is never recreated. Mounts and GPUs are fixed at
+// create time.
 func (s *Server) handleUpdateInstance(w http.ResponseWriter, r *http.Request) {
 	inst, err := s.store.GetInstance(r.PathValue("id"))
 	if err != nil {
@@ -313,6 +313,9 @@ func (s *Server) handleUpdateInstance(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Name != "" {
 		inst.Name = req.Name
+	}
+	if req.EnvVars != nil {
+		inst.EnvVars = sanitizeUserEnv(*req.EnvVars)
 	}
 	if req.EndpointKeys != nil {
 		keys := make([]models.APIKey, 0, len(*req.EndpointKeys))
@@ -335,7 +338,6 @@ func (s *Server) handleUpdateInstance(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		inst.Endpoints = endpoints
-		inst.EnvVars = buildInstanceEnv(inst.EnvVars, s.proxy.CACertPEM)
 		if err := s.syncInstanceHosts(r.Context(), inst); err != nil {
 			writeError(w, http.StatusBadGateway, "sync hosts: "+err.Error())
 			return
@@ -359,22 +361,44 @@ func (s *Server) syncInstanceHosts(ctx context.Context, inst models.Instance) er
 	return s.docker.SyncHosts(ctx, inst.ContainerID, mockHosts(inst.Endpoints), "127.0.0.1")
 }
 
-// buildInstanceEnv returns the container environment for an instance: the base
-// (user) variables plus CA trust settings. Provider dummy tokens are deliberately
-// excluded — they are injected per exec session so endpoints can change live.
-func buildInstanceEnv(base map[string]string, caPEM []byte) map[string]string {
+// sanitizeUserEnv drops Vivarium-managed provider variables from a user-supplied
+// environment; those are injected per exec session.
+func sanitizeUserEnv(base map[string]string) map[string]string {
 	managed := managedProviderEnvNames()
-	env := make(map[string]string, len(base)+3)
+	env := make(map[string]string, len(base))
 	for k, v := range base {
 		if _, ok := managed[k]; ok {
 			continue
 		}
 		env[k] = v
 	}
+	return env
+}
+
+// containerEnv is the environment baked into the container at creation: the
+// user env plus CA trust settings.
+func containerEnv(userEnv map[string]string, caPEM []byte) map[string]string {
+	env := make(map[string]string, len(userEnv)+3)
+	for k, v := range userEnv {
+		env[k] = v
+	}
 	if len(caPEM) > 0 {
 		env["SSL_CERT_FILE"] = docker.GuestCAPEMPath
 		env["REQUESTS_CA_BUNDLE"] = docker.GuestCAPEMPath
 		env["NODE_EXTRA_CA_CERTS"] = docker.GuestCAPEMPath
+	}
+	return env
+}
+
+// execEnv merges the persisted user env with the provider dummy tokens for a new
+// interactive session. CA trust vars are inherited from the container.
+func execEnv(userEnv map[string]string, endpoints []models.InstanceEndpoint) map[string]string {
+	env := make(map[string]string, len(userEnv)+len(endpoints))
+	for k, v := range userEnv {
+		env[k] = v
+	}
+	for k, v := range providerKeyEnv(endpoints) {
+		env[k] = v
 	}
 	return env
 }
@@ -579,7 +603,7 @@ func (s *Server) handleConnectInstance(w http.ResponseWriter, r *http.Request) {
 	cols, _ := strconv.Atoi(r.URL.Query().Get("cols"))
 	rows, _ := strconv.Atoi(r.URL.Query().Get("rows"))
 
-	stream, execID, err := s.docker.Connect(r.Context(), inst.ContainerID, cols, rows, providerKeyEnv(inst.Endpoints))
+	stream, execID, err := s.docker.Connect(r.Context(), inst.ContainerID, cols, rows, execEnv(inst.EnvVars, inst.Endpoints))
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "connect: "+err.Error())
 		return

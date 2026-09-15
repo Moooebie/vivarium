@@ -49,7 +49,7 @@ cmd/vivarium/main.go   # mode dispatch: TUI (default) | --daemon | --stop | rese
 | --- | --- |
 | `GET /api/v1/ping` | Readiness probe for the TUI. |
 | `GET /api/v1/system/status` | Gains a `version` field. |
-| `PUT /api/v1/instances/{id}` | Rename and/or rebind API endpoints (live; no recreate). |
+| `PUT /api/v1/instances/{id}` | Rename, rebind API endpoints, and/or update the user env (all live; no recreate). |
 | `GET /api/v1/api-keys/{id}/secret` | Return the stored secret for reveal (unlocked store). |
 | `GET /api/v1/instances/{id}/connect` | Upgrade to a raw stream for a new interactive exec shell. |
 | `POST /api/v1/instances/{id}/exec/{execID}/resize` | Resize an interactive exec session. |
@@ -157,9 +157,11 @@ No IPC changes were required; the TUI talks only to the unchanged API.
   ephemeral recipe editor, whose final button is **Create & Launch**. The
   redundant Mounts/GPUs steps are removed (the recipe owns them).
 - **Edit Instance.** Actions are a vertical list: **API Endpoints** (shared
-  manager, applied on exit), **Connection Info**, Start/Halt, Connect, Clone,
-  Rename, Inject, Delete. **Mount Points** and **GPUs** are disabled with a note
-  because they are fixed at creation.
+  manager, applied on exit), **Environment Variables** (user env, applied on
+  save), **Connection Info**, Start/Halt, Connect, Clone, Rename, Inject,
+  Delete. **Mount Points** and **GPUs** are disabled with a note because they
+  are fixed at creation. Endpoint and env changes take effect on new sessions
+  (no container recreate).
 - **Connect safety.** Connecting to a non-running container is rejected
   (`409`) by the daemon and guarded in the TUI, because Docker's API returns
   `101 UPGRADED` and hangs for stopped containers. Each connect opens an
